@@ -1,4 +1,5 @@
 import type { ParseIssue, ParsePayload } from "../../types";
+import { WorkerMessageHandler } from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import { issue, normalizeMarkdownBody } from "../normalizer";
 import {
   OcrRequiredError,
@@ -96,6 +97,7 @@ export class PdfParser implements DocumentParser {
     const repeatedMarginTextPageRatio = numericOption(context.options, "repeatedMarginTextPageRatio", 0.6);
     const timeoutMs = numericOption(context.options, "timeoutMs", 120_000);
     const deadline = Date.now() + timeoutMs;
+    configurePdfJsWorker();
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
     const task = pdfjs.getDocument({ data: input.bytes, disableWorker: true } as any);
     let document: any;
@@ -201,6 +203,13 @@ export class PdfParser implements DocumentParser {
       }
     };
   }
+}
+
+function configurePdfJsWorker(): void {
+  const runtime = globalThis as typeof globalThis & {
+    pdfjsWorker?: { WorkerMessageHandler: unknown };
+  };
+  runtime.pdfjsWorker ??= { WorkerMessageHandler };
 }
 
 export function reconstructPdfLines(
