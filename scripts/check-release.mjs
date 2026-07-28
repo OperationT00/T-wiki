@@ -8,17 +8,17 @@ const [manifest, packageJson, versions] = await Promise.all([
 
 const errors = [];
 if (manifest.version !== packageJson.version) {
-  errors.push(`manifest.json (${manifest.version}) 与 package.json (${packageJson.version}) 版本不一致`);
+  errors.push(`manifest.json (${manifest.version}) and package.json (${packageJson.version}) versions differ`);
 }
 if (versions[manifest.version] !== manifest.minAppVersion) {
-  errors.push(`versions.json 缺少 ${manifest.version} → ${manifest.minAppVersion}`);
+  errors.push(`versions.json is missing ${manifest.version} -> ${manifest.minAppVersion}`);
 }
-if (manifest.author !== "T00") errors.push("manifest.json author 必须为 T00");
-if (manifest.id !== "llm-wiki") errors.push("manifest.json id 必须为 llm-wiki");
+if (manifest.author !== "T00") errors.push("manifest.json author must be T00");
+if (manifest.id !== "t-wiki") errors.push("manifest.json id must be t-wiki");
 
 const tag = process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : process.argv[2];
 if (tag && tag !== manifest.version) {
-  errors.push(`Release Tag (${tag}) 必须与 manifest version (${manifest.version}) 完全一致`);
+  errors.push(`Release tag (${tag}) must exactly match manifest version (${manifest.version})`);
 }
 
 if (errors.length > 0) {

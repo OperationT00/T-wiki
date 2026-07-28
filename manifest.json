@@ -1,7 +1,7 @@
 {
-  "id": "llm-wiki",
+  "id": "t-wiki",
   "name": "T-Wiki",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.11.4",
   "description": "Turn source documents into a structured, traceable, LLM-powered wiki.",
   "author": "T00",

@@ -7,7 +7,7 @@ const mode = process.argv[2] ?? "development";
 const production = mode === "production" || mode === "install";
 const outDir = mode === "production"
   ? path.resolve("dist")
-  : path.resolve(process.env.T_WIKI_DEV_PLUGIN_DIR ?? "../.obsidian/plugins/llm-wiki");
+  : path.resolve(process.env.T_WIKI_DEV_PLUGIN_DIR ?? "../.obsidian/plugins/t-wiki");
 await mkdir(outDir, { recursive: true });
 
 const context = await esbuild.context({

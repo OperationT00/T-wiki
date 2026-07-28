@@ -22,7 +22,7 @@ export const DEFAULT_PLUGIN_SETTINGS: PluginSettings = {
   agent: {
     protocol: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
-    secretId: "llm-wiki-agent-api-token",
+    secretId: "t-wiki-agent-api-token",
     structuredOutputMode: "auto",
     timeoutMs: 300_000,
     maxRetries: 2,

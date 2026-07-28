@@ -2,6 +2,12 @@
 
 All notable changes to T-Wiki are documented in this file.
 
+## 0.1.1
+
+- Change the Obsidian plugin ID from `llm-wiki` to the unique community ID `t-wiki`.
+- Namespace Agent and MinerU Secret Storage keys under `t-wiki` to avoid collisions with other plugins.
+- Keep existing `.llm-wiki/` workspace data and Markdown artifact contracts compatible.
+
 ## 0.1.0
 
 - First stable release of the traceable Raw-to-Wiki workflow.

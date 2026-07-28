@@ -40,10 +40,10 @@ npm.cmd run verify
 dist/
 ```
 
-开发监听默认写入 `../.obsidian/plugins/llm-wiki`，也可以通过 `T_WIKI_DEV_PLUGIN_DIR` 指定测试 Vault 的插件目录：
+开发监听默认写入 `../.obsidian/plugins/t-wiki`，也可以通过 `T_WIKI_DEV_PLUGIN_DIR` 指定测试 Vault 的插件目录：
 
 ```powershell
-$env:T_WIKI_DEV_PLUGIN_DIR="D:\path\to\vault\.obsidian\plugins\llm-wiki"
+$env:T_WIKI_DEV_PLUGIN_DIR="D:\path\to\vault\.obsidian\plugins\t-wiki"
 npm.cmd run dev
 ```
 

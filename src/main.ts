@@ -24,8 +24,8 @@ import { DeleteSourceModal, InitializeModal, RollbackModal, UrlCaptureModal } fr
 import { LLMWikiSettingTab } from "./ui/settings-tab";
 import { VIEW_TYPE_LLM_WIKI, WorkbenchView } from "./ui/workbench-view";
 
-export const MINERU_CLOUD_SECRET_ID = "llm-wiki-mineru-cloud-token";
-export const MINERU_SELF_HOSTED_SECRET_ID = "llm-wiki-mineru-self-hosted-token";
+export const MINERU_CLOUD_SECRET_ID = "t-wiki-mineru-cloud-token";
+export const MINERU_SELF_HOSTED_SECRET_ID = "t-wiki-mineru-self-hosted-token";
 
 export default class LLMWikiPlugin extends Plugin {
   declare settings: PluginSettings;
