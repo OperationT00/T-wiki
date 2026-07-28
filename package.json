@@ -1,0 +1,41 @@
+{
+  "name": "t-wiki-obsidian",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "description": "Compile source documents into a structured, traceable and interconnected Markdown wiki in Obsidian.",
+  "author": "T00",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OperationT00/T-wiki.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs development",
+    "build:dev-install": "node esbuild.config.mjs install",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "verify": "npm run typecheck && npm run test && npm run build",
+    "release:check": "node scripts/check-release.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "defuddle": "0.19.2",
+    "fflate": "^0.8.2",
+    "js-yaml": "^4.1.0",
+    "jsonrepair": "^3.13.1",
+    "openai": "^6.49.0",
+    "pdfjs-dist": "^5.4.530"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/jsdom": "^27.0.0",
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^29.1.1",
+    "obsidian": "latest",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}
