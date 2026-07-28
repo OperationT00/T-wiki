@@ -2,6 +2,11 @@
 
 All notable changes to T-Wiki are documented in this file.
 
+## 0.1.0-beta.3
+
+- Add a guided first-run homepage for initializing an empty Obsidian Vault.
+- Bundle the PDF.js worker handler so local PDF parsing works in packaged installs without external files or a CDN.
+
 ## 0.1.0-beta.1
 
 - Import Markdown, text, public web pages and PDFs into verified canonical Raw Markdown.
