@@ -21,11 +21,15 @@ export class LLMWikiSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "T-Wiki 设置" });
+    new Setting(containerEl)
+      .setName("T-Wiki 设置")
+      .setHeading();
 
     this.renderAgentSettings();
 
-    containerEl.createEl("h3", { text: "模型映射" });
+    new Setting(containerEl)
+      .setName("模型映射")
+      .setHeading();
     for (const role of ["fast", "default", "deep"] as const) this.renderModel(role);
 
     this.renderAgentBudgets();
@@ -37,7 +41,9 @@ export class LLMWikiSettingTab extends PluginSettingTab {
 
   private renderAgentSettings(): void {
     const agent = this.plugin.settings.agent;
-    this.containerEl.createEl("h3", { text: "Agent Runtime / LLM API" });
+    new Setting(this.containerEl)
+      .setName("Agent Runtime / LLM API")
+      .setHeading();
     this.containerEl.createEl("p", {
       text: "Ingest 时，canonical raw Markdown 与检索到的 Wiki 上下文会发送到所配置的远程 API。Token 仅保存到 Secret Storage。",
       cls: "llm-wiki-muted"
@@ -146,7 +152,9 @@ export class LLMWikiSettingTab extends PluginSettingTab {
   }
 
   private renderAgentBudgets(): void {
-    this.containerEl.createEl("h3", { text: "Agent Loop 预算" });
+    new Setting(this.containerEl)
+      .setName("Agent Loop 预算")
+      .setHeading();
     this.containerEl.createEl("p", {
       text: "预算用于限制模型循环、工具调用、页面变更、累计 Token 和总耗时。单轮上下文容量由模型 context window 独立控制。修改只影响新启动的 Agent Run。",
       cls: "llm-wiki-muted"
@@ -199,7 +207,9 @@ export class LLMWikiSettingTab extends PluginSettingTab {
   }
 
   private renderWebClipper(): void {
-    this.containerEl.createEl("h3", { text: "来源采集 / Obsidian Web Clipper" });
+    new Setting(this.containerEl)
+      .setName("来源采集 / Obsidian Web Clipper")
+      .setHeading();
     new Setting(this.containerEl)
       .setName("监听 Clipper Inbox")
       .setDesc("只自动 Parse 到 raw，不会自动调用 Agent 或 Ingest。")
@@ -252,11 +262,13 @@ export class LLMWikiSettingTab extends PluginSettingTab {
   }
 
   private async renderMinerU(): Promise<void> {
-    const heading = this.containerEl.createEl("h3", { text: "文档解析 / MinerU" });
+    new Setting(this.containerEl)
+      .setName("文档解析 / MinerU")
+      .setHeading();
     if (!(await this.plugin.wiki.isInitialized())) {
-      heading.insertAdjacentElement("afterend", this.containerEl.createEl("p", {
+      this.containerEl.createEl("p", {
         text: "初始化 T-Wiki 后可配置 MinerU。"
-      }));
+      });
       return;
     }
     const config = await this.plugin.wiki.loadConfig();

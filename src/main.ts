@@ -87,7 +87,6 @@ export default class LLMWikiPlugin extends Plugin {
     void this.filePicker.stop();
     void this.urlCapture.stop();
     void this.webClipper?.stop();
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE_LLM_WIKI);
   }
 
   async importFiles(files: File[]): Promise<import("./types").SourceManifest[]> {
