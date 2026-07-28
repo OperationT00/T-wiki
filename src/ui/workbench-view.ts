@@ -112,11 +112,12 @@ export class WorkbenchView extends ItemView {
     refresh.onclick = () => void this.render();
 
     if (!(await this.plugin.wiki.isInitialized())) {
-      const card = root.createDiv({ cls: "llm-wiki-card" });
-      card.createEl("h3", { text: "当前 Vault 尚未初始化" });
-      card.createEl("p", { text: "初始化会生成规则、目录、模板和状态文件；检测到旧 Wiki 时先创建备份。" });
-      const button = card.createEl("button", { text: "初始化 T-Wiki", cls: "mod-cta" });
-      button.onclick = () => new InitializeModal(this.plugin).open();
+      root.dataset.llmWikiActiveTab = "home";
+      const tabs = root.createDiv({ cls: "llm-wiki-tabs" });
+      const homeTab = tabs.createEl("button", { text: "首页", cls: "llm-wiki-tab is-active" });
+      homeTab.disabled = true;
+      const panel = root.createDiv({ cls: "llm-wiki-panel" });
+      this.renderInitializationHome(panel);
       return;
     }
     await this.ensureProgressSubscription();
@@ -191,6 +192,40 @@ export class WorkbenchView extends ItemView {
     for (const item of state.recentOperations.slice(0, 10)) {
       recent.createEl("p", { text: `${new Date(item.at).toLocaleString()} · ${item.summary}` });
     }
+  }
+
+  private renderInitializationHome(panel: HTMLElement): void {
+    const onboarding = panel.createDiv({ cls: "llm-wiki-onboarding" });
+    onboarding.createSpan({ text: "首次使用", cls: "llm-wiki-onboarding-badge" });
+    onboarding.createEl("h1", { text: "创建你的 T-Wiki 工作空间" });
+    onboarding.createEl("p", {
+      text: "当前 Vault 还是空的。初始化后即可导入文档，把原始资料持续整理成可追溯、互相链接的 Markdown Wiki。",
+      cls: "llm-wiki-onboarding-lead"
+    });
+
+    const contents = onboarding.createDiv({ cls: "llm-wiki-onboarding-contents" });
+    for (const [title, description] of [
+      ["Raw 与 Wiki 目录", "保存规范原文和结构化知识页面"],
+      ["模板与 Agent 规则", "生成 Source、Entity、Concept、Synthesis 和 Output 模板"],
+      ["内部状态与索引", "建立来源追溯、解析状态、审计数据和可重建导航索引"]
+    ]) {
+      const item = contents.createDiv({ cls: "llm-wiki-onboarding-item" });
+      const marker = item.createSpan({ cls: "llm-wiki-onboarding-check", attr: { "aria-hidden": "true" } });
+      setIcon(marker, "check");
+      const copy = item.createDiv();
+      copy.createEl("strong", { text: title });
+      copy.createEl("span", { text: description });
+    }
+
+    const actions = onboarding.createDiv({ cls: "llm-wiki-onboarding-actions" });
+    const initialize = actions.createEl("button", { cls: "mod-cta llm-wiki-initialize-button" });
+    setIcon(initialize, "sparkles");
+    initialize.createSpan({ text: "初始化 T-Wiki" });
+    initialize.onclick = () => new InitializeModal(this.plugin).open();
+    actions.createEl("p", {
+      text: "初始化只创建本地目录和规则，不会自动上传资料或调用 LLM API。",
+      cls: "llm-wiki-muted"
+    });
   }
 
   private async showLint(panel: HTMLElement): Promise<void> {

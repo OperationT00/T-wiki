@@ -453,6 +453,109 @@
   background: var(--background-secondary);
 }
 
+.llm-wiki-onboarding {
+  width: min(720px, 100%);
+  box-sizing: border-box;
+  margin: clamp(18px, 7vh, 72px) auto 24px;
+  padding: clamp(22px, 4vw, 42px);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--interactive-accent) 14%, transparent), transparent 38%),
+    var(--background-secondary);
+  box-shadow: var(--shadow-s);
+}
+
+.llm-wiki-onboarding-badge {
+  display: inline-flex;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+}
+
+.llm-wiki-onboarding h1 {
+  margin: 14px 0 8px;
+  font-size: clamp(1.65em, 4vw, 2.25em);
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+}
+
+.llm-wiki-onboarding-lead {
+  max-width: 620px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 1.02em;
+  line-height: 1.65;
+}
+
+.llm-wiki-onboarding-contents {
+  display: grid;
+  gap: 12px;
+  margin-top: 26px;
+}
+
+.llm-wiki-onboarding-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.llm-wiki-onboarding-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 14%, transparent);
+}
+
+.llm-wiki-onboarding-check svg {
+  width: 14px;
+  height: 14px;
+}
+
+.llm-wiki-onboarding-item strong,
+.llm-wiki-onboarding-item span {
+  display: block;
+}
+
+.llm-wiki-onboarding-item span {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+}
+
+.llm-wiki-onboarding-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 30px;
+}
+
+.llm-wiki-onboarding-actions p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+.llm-wiki-initialize-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding-inline: 15px;
+}
+
+.llm-wiki-initialize-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .llm-wiki-source-heading {
   display: flex;
   align-items: center;
