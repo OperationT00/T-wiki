@@ -1,6 +1,6 @@
 {
   "name": "t-wiki-obsidian",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0",
   "private": true,
   "description": "Compile source documents into a structured, traceable and interconnected Markdown wiki in Obsidian.",
   "author": "T00",

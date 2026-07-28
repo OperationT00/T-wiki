@@ -2,6 +2,13 @@
 
 All notable changes to T-Wiki are documented in this file.
 
+## 0.1.0
+
+- First stable release of the traceable Raw-to-Wiki workflow.
+- Support Markdown, text, public web pages, local PDF.js parsing and optional MinerU fallback.
+- Provide reviewable Agent Ingest, linked Wiki generation and Index-first multi-hop Query.
+- Include first-run workspace initialization and a self-contained PDF.js worker for packaged installs.
+
 ## 0.1.0-beta.3
 
 - Add a guided first-run homepage for initializing an empty Obsidian Vault.
