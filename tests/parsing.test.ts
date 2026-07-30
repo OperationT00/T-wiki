@@ -470,6 +470,49 @@ test("unsupported formats create a parse_failed attempt without publishing raw",
   assert.equal(imported.parse.revisions.length, 0);
 });
 
+test("media raw uses the generated author-summary basename once and keeps it stable across reparses", async () => {
+  const adapter = new MemoryAdapter();
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.parsing.providers["media-transcription"]!.enabled = true;
+  let title = "70387613618-Java Agent 架构设计";
+  const mediaParser: DocumentParser = {
+    descriptor: {
+      id: "media-transcription",
+      version: "1.2.0",
+      execution: "local",
+      supportedKinds: ["video"],
+      capabilities: { sourceMap: false, assets: false, resumable: false }
+    },
+    validateOptions() {},
+    probe: () => ({ supported: true, confidence: 1 }),
+    parse: async () => ({
+      schemaVersion: 2,
+      markdown: `# ${title}\n\n正文。\n`,
+      metadata: { title },
+      assets: [],
+      issues: []
+    })
+  };
+  const service = new ParsingService(
+    adapter as unknown as DataAdapter,
+    config,
+    undefined,
+    new ParserRegistry().register(mediaParser)
+  );
+  const bytes = new Uint8Array(16);
+  bytes.set(new TextEncoder().encode("ftypisom"), 4);
+  const first = await service.importBytes("platform-caption.mp4", bytes);
+  const hashPrefix = first.sourceHash.slice(0, 8);
+  assert.equal(first.parse.revisions[0]?.rawPath, `raw/videos/70387613618-java-agent-架构设计--${hashPrefix}.md`);
+
+  title = "70387613618-重新生成但不改已有路径";
+  const reparsed = await service.parseSource(first.sourceId, true);
+  assert.equal(
+    reparsed.parse.revisions[1]?.rawPath,
+    `raw/videos/70387613618-java-agent-架构设计--${hashPrefix}--r2.md`
+  );
+});
+
 test("v2 manifest normalizes to v3 without reparsing legacy raw", () => {
   const value = normalizeManifest({
     schemaVersion: 2,
@@ -517,7 +560,7 @@ test("v2 manifest normalizes to v3 without reparsing legacy raw", () => {
   assert.deepEqual(value.parse.attempts, []);
 });
 
-test("v2 parsing config maps to namespaced v3 provider options", () => {
+test("legacy parsing config maps to namespaced v4 provider options", () => {
   const migrated = mergeConfig({
     schemaVersion: 2,
     parsing: {
@@ -534,7 +577,8 @@ test("v2 parsing config maps to namespaced v3 provider options", () => {
       }
     }
   } as any);
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.parsing.maxMediaImportBytes, 500 * 1024 * 1024);
   assert.equal(migrated.parsing.providers["pdfjs-layout"]?.options.maxPdfPages, 44);
   assert.equal(migrated.parsing.providers["pdfjs-layout"]?.options.maxPdfTextItems, 55);
   assert.equal("pdf" in migrated.parsing, false);
@@ -644,7 +688,7 @@ test("parser assets are published, rewritten, and hash verified", async () => {
         assetId: "figure-1",
         mime: "image/png",
         bytes: assetBytes,
-        source: { startLine: 1, endLine: 1 }
+        source: { startLine: 1, endLine: 1, startMs: 12_000, endMs: 12_000 }
       }],
       issues: []
     })
@@ -659,11 +703,47 @@ test("parser assets are published, rewritten, and hash verified", async () => {
   const revision = imported.parse.revisions[0]!;
   assert.equal(revision.assets?.length, 1);
   const asset = revision.assets![0]!;
+  assert.deepEqual(asset.source, { startLine: 1, endLine: 1, startMs: 12_000, endMs: 12_000 });
   assert.equal(await adapter.exists(asset.path), true);
   assert.match(await adapter.read(revision.rawPath), /!\[figure\]\(\.\.\/assets\//);
   assert.equal((await service.verifyRaw())[0]?.ok, true);
   await adapter.writeBinary(asset.path, new Uint8Array([0]).buffer);
   assert.equal((await service.verifyRaw())[0]?.ok, false);
+});
+
+test("parser runtime fingerprint invalidates a deterministic parse cache without forcing", async () => {
+  const adapter = new MemoryAdapter();
+  let runtime = "ffmpeg-a";
+  let parses = 0;
+  const parser: DocumentParser = {
+    descriptor: {
+      id: "runtime-parser",
+      version: "1.0.0",
+      execution: "local",
+      supportedKinds: ["unknown"],
+      capabilities: { sourceMap: false, assets: false, resumable: false }
+    },
+    validateOptions: () => undefined,
+    probe: () => ({ supported: true, confidence: 1 }),
+    runtimeFingerprint: () => runtime,
+    parse: async () => {
+      parses += 1;
+      return { schemaVersion: 2, markdown: `run ${parses}\n`, metadata: {}, assets: [], issues: [] };
+    }
+  };
+  const service = new ParsingService(
+    adapter as unknown as DataAdapter,
+    DEFAULT_CONFIG,
+    undefined,
+    new ParserRegistry([parser])
+  );
+  const imported = await service.importBytes("runtime.custom", new Uint8Array([7, 8, 9]));
+  await service.parseSource(imported.sourceId);
+  assert.equal(parses, 1);
+  runtime = "ffmpeg-b";
+  const reparsed = await service.parseSource(imported.sourceId);
+  assert.equal(parses, 2);
+  assert.equal(reparsed.parse.revisions.length, 2);
 });
 
 test("legacy raw v1 remains ingestible after manifest normalization", async () => {

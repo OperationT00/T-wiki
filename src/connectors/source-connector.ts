@@ -2,7 +2,10 @@ import type { EventRef, TAbstractFile, TFile } from "obsidian";
 
 import type { SourceManifest, SourceKind } from "../types";
 import type { IntakeProvenance } from "../services/intake-service";
+import { sourceBodyFromBlob, type SourceBody } from "../parsing/parser-types";
 import type { WebPageFetcherPort } from "./web-page-fetcher";
+import { setAppTimeout } from "../utils/timers";
+import { replaceUnsafeFilenameCharacters } from "../utils/text-safety";
 
 export interface ConnectorScanResult {
   imported: number;
@@ -14,6 +17,11 @@ export interface SourceConnectorContext {
   importSource(
     name: string,
     bytes: Uint8Array,
+    provenance: IntakeProvenance
+  ): Promise<{ manifest: SourceManifest; duplicate: boolean }>;
+  importSourceBody?(
+    name: string,
+    source: SourceBody,
     provenance: IntakeProvenance
   ): Promise<{ manifest: SourceManifest; duplicate: boolean }>;
   reportError?(connectorId: string, path: string, error: unknown): void;
@@ -38,11 +46,12 @@ export class FilePickerConnector implements SourceConnector {
     if (!this.context) throw new Error("FilePickerConnector 尚未启动");
     const output: SourceManifest[] = [];
     for (const file of files) {
-      output.push((await this.context.importSource(
-        file.name,
-        new Uint8Array(await file.arrayBuffer()),
-        { acquiredBy: "file-picker" }
-      )).manifest);
+      const body = sourceBodyFromBlob(file);
+      const provenance = { acquiredBy: "file-picker", deferParse: isMediaFileName(file.name) };
+      const imported = this.context.importSourceBody
+        ? await this.context.importSourceBody(file.name, body, provenance)
+        : await this.context.importSource(file.name, await body.readAll(file.size), provenance);
+      output.push(imported.manifest);
     }
     return output;
   }
@@ -52,10 +61,17 @@ export class FilePickerConnector implements SourceConnector {
   }
 }
 
+function isMediaFileName(name: string): boolean {
+  return /\.(?:mp3|mp4|mpeg|mpga|m4a|wav|webm|mov|ogg|oga|flac|mkv|avi)$/i.test(name);
+}
+
 export interface UrlCaptureRequest {
   url: string;
+  mode?: "web" | "video";
   signal?: AbortSignal;
   reportProgress?(phase: "download" | "parse" | "complete"): void;
+  bilibiliPages?: "current" | "all" | number[];
+  bilibiliLanguage?: string;
 }
 
 export interface UrlCaptureResult {
@@ -120,9 +136,9 @@ export function sourceNameForUrl(input: string): string {
   } catch {
     // Keep the encoded path segment when it contains malformed escapes.
   }
-  const basename = decoded
+  const basename = replaceUnsafeFilenameCharacters(decoded
     .replace(/\.(?:html?|xhtml)$/i, "")
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+  )
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120) || url.hostname;
@@ -137,10 +153,10 @@ export interface WebClipperOptions {
 }
 
 interface VaultLike {
+  readonly configDir: string;
   on(name: "create", callback: (file: TAbstractFile) => unknown): EventRef;
   on(name: "rename", callback: (file: TAbstractFile, oldPath: string) => unknown): EventRef;
   offref(ref: EventRef): void;
-  getMarkdownFiles(): TFile[];
   getAbstractFileByPath(path: string): TAbstractFile | null;
   readBinary(file: TFile): Promise<ArrayBuffer>;
 }
@@ -161,7 +177,7 @@ export class WebClipperInboxConnector implements SourceConnector {
       settleDelayMs: options.settleDelayMs ?? 750,
       settleAttempts: options.settleAttempts ?? 5
     };
-    this.inboxPath = validateInboxPath(options.inboxPath);
+    this.inboxPath = validateInboxPath(options.inboxPath, vault.configDir);
   }
 
   private readonly options: Required<WebClipperOptions>;
@@ -179,7 +195,8 @@ export class WebClipperInboxConnector implements SourceConnector {
   async scan(): Promise<ConnectorScanResult> {
     if (!this.context) throw new Error("WebClipperInboxConnector 尚未启动");
     const result: ConnectorScanResult = { imported: 0, duplicates: 0, failed: [] };
-    for (const file of this.vault.getMarkdownFiles().filter((candidate) => this.accepts(candidate.path))) {
+    const root = this.vault.getAbstractFileByPath(this.inboxPath);
+    for (const file of markdownFilesUnder(root).filter((candidate) => this.accepts(candidate.path))) {
       try {
         const imported = await this.importStable(file.path);
         if (imported.duplicate) result.duplicates += 1;
@@ -239,18 +256,25 @@ export class WebClipperInboxConnector implements SourceConnector {
   }
 }
 
-export function validateInboxPath(input: string): string {
+export function validateInboxPath(input: string, configDir: string): string {
   const path = normalizeVaultPath(input).replace(/\/$/, "");
   if (!path || path === "." || path.split("/").includes("..")) {
     throw new Error("Web Clipper Inbox 路径无效");
   }
-  const protectedRoots = ["raw", "wiki", ".llm-wiki", ".obsidian"];
+  const protectedRoots = ["raw", "wiki", ".llm-wiki", normalizeVaultPath(configDir)];
   if (protectedRoots.some((root) =>
     path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`)
   )) {
     throw new Error(`Web Clipper Inbox 不能与系统目录重叠：${path}`);
   }
   return path;
+}
+
+function markdownFilesUnder(root: TAbstractFile | null): TFile[] {
+  if (!root) return [];
+  if (isTFile(root)) return root.extension.toLocaleLowerCase() === "md" ? [root] : [];
+  if (!("children" in root) || !Array.isArray(root.children)) return [];
+  return root.children.flatMap((child) => markdownFilesUnder(child));
 }
 
 function normalizeVaultPath(path: string): string {
@@ -262,5 +286,5 @@ function isTFile(file: TAbstractFile | null): file is TFile {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise<void>((resolve) => setAppTimeout(resolve, ms));
 }

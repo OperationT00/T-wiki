@@ -18,7 +18,7 @@ export const DEFAULT_AGENT_BUDGETS: Record<AgentBudgetName, AgentBudget> = {
 };
 
 export const DEFAULT_PLUGIN_SETTINGS: PluginSettings = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   agent: {
     protocol: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
@@ -41,6 +41,15 @@ export const DEFAULT_PLUGIN_SETTINGS: PluginSettings = {
     enabled: false,
     inboxPath: "Clippings",
     scanExistingOnStartup: false
+  },
+  onlineVideo: {
+    douyin: {
+      enabled: false,
+      ytDlpPath: "",
+      maxDownloadBytes: 500 * 1024 * 1024,
+      taskTimeoutMs: 30 * 60 * 1000,
+      cookieBrowser: "edge"
+    }
   }
 };
 
@@ -61,7 +70,7 @@ export function normalizePluginSettings(data: StoredPluginSettings | null | unde
     ? "openai-chat-completions"
     : "anthropic-messages";
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     agent: {
       ...defaults.agent,
       ...(agentInput ?? {}),
@@ -87,7 +96,33 @@ export function normalizePluginSettings(data: StoredPluginSettings | null | unde
     webClipper: {
       ...defaults.webClipper,
       ...(data?.webClipper && typeof data.webClipper === "object" ? data.webClipper : {})
+    },
+    onlineVideo: {
+      douyin: normalizeDouyinSettings(data?.onlineVideo)
     }
+  };
+}
+
+function normalizeDouyinSettings(value: unknown): PluginSettings["onlineVideo"]["douyin"] {
+  const defaults = DEFAULT_PLUGIN_SETTINGS.onlineVideo.douyin;
+  const online = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const douyin = online.douyin && typeof online.douyin === "object" && !Array.isArray(online.douyin)
+    ? online.douyin as Record<string, unknown>
+    : {};
+  const browser = douyin.cookieBrowser;
+  return {
+    enabled: douyin.enabled === true,
+    ytDlpPath: typeof douyin.ytDlpPath === "string" ? douyin.ytDlpPath.trim() : defaults.ytDlpPath,
+    maxDownloadBytes: normalizeInteger(
+      douyin.maxDownloadBytes,
+      1 * 1024 * 1024,
+      500 * 1024 * 1024,
+      defaults.maxDownloadBytes
+    ),
+    taskTimeoutMs: normalizeInteger(douyin.taskTimeoutMs, 30_000, 3_600_000, defaults.taskTimeoutMs),
+    cookieBrowser: browser === "chrome" || browser === "firefox" ? browser : "edge"
   };
 }
 

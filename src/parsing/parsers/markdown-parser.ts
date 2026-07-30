@@ -1,8 +1,7 @@
-import yaml from "js-yaml";
-
 import type { ParsePayload, SourceMetadata } from "../../types";
+import { parseYaml } from "../../utils/yaml";
 import { decodeText, issue, normalizeMarkdownBody } from "../normalizer";
-import type { DocumentParser, ParseContext, ParseInput, ProbeResult } from "../parser-types";
+import { parseInputSize, parseInputSource, type DocumentParser, type ParseContext, type ParseInput, type ProbeResult } from "../parser-types";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?/;
 
@@ -26,21 +25,23 @@ export class MarkdownParser implements DocumentParser {
   }
 
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
+    const size = parseInputSize(input);
+    const bytes = await parseInputSource(input).readAll(size);
     context.reportProgress({
       phase: "parsing",
       completed: 0,
-      total: Math.max(1, input.bytes.length),
+      total: Math.max(1, size),
       unit: "byte",
       message: "正在读取 Markdown"
     });
-    const decoded = decodeText(input.bytes, false).replace(/\r\n?/g, "\n");
+    const decoded = decodeText(bytes, false).replace(/\r\n?/g, "\n");
     const match = decoded.match(FRONTMATTER);
     let body = decoded;
     let metadata: SourceMetadata = {};
     const issues = [];
     if (match?.[1] !== undefined) {
       try {
-        metadata = normalizeMetadata((yaml.load(match[1]) as Record<string, unknown>) ?? {});
+        metadata = normalizeMetadata((parseYaml(match[1]) as Record<string, unknown>) ?? {});
         body = decoded.slice(match[0].length);
       } catch {
         issues.push(issue("MARKDOWN_FRONTMATTER_INVALID", "原 Markdown frontmatter 无法解析，已按正文原样保留"));
@@ -59,8 +60,8 @@ export class MarkdownParser implements DocumentParser {
     if (title) metadata.title = title;
     context.reportProgress({
       phase: "parsing",
-      completed: Math.max(1, input.bytes.length),
-      total: Math.max(1, input.bytes.length),
+      completed: Math.max(1, size),
+      total: Math.max(1, size),
       unit: "byte",
       message: "Markdown 解析完成"
     });

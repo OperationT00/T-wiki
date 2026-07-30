@@ -4,11 +4,15 @@ import type {
   RawVerification,
   SourceManifest
 } from "../types";
+import type { SourceBody } from "./parser-types";
 
 export interface ObjectStorePort {
   initialize(): Promise<void>;
   put(sourceHash: string, extension: string, bytes: Uint8Array): Promise<string>;
+  putBody?(sourceHash: string, extension: string, source: SourceBody): Promise<string>;
   read(manifest: SourceManifest): Promise<Uint8Array>;
+  body?(manifest: SourceManifest): Promise<SourceBody>;
+  verify?(manifest: SourceManifest): Promise<void>;
 }
 
 export interface ManifestRepositoryPort {

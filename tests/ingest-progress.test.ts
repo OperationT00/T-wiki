@@ -99,6 +99,10 @@ test("pipeline maps parse, ingest, review, failure, and completion states", () =
   source.parse.status = "parsed";
   source.ingest.status = "ingest_failed";
   assert.equal(sourcePipelineSteps(source)[2]?.state, "failed");
+  source.parse.status = "queued";
+  assert.equal(sourcePipelineSteps(source)[1]?.state, "pending");
+  source.parse.status = "parsing";
+  assert.equal(sourcePipelineSteps(source)[1]?.state, "active");
 });
 
 function manifest(): SourceManifest {

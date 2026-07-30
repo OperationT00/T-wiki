@@ -1,6 +1,5 @@
-import yaml from "js-yaml";
-
 import { sha256 } from "../core/wiki-core";
+import { stringifyYaml } from "../utils/yaml";
 import type {
   ParsePayload,
   ParseQuality,
@@ -20,6 +19,8 @@ export interface BuiltRawArtifact {
   artifactHash: string;
   assets: Array<PublishedAsset & { bytes: Uint8Array }>;
   quality: ParseQuality;
+  /** Human-readable basename suggestion. RawPublisher keeps the first published basename stable. */
+  suggestedBasename?: string;
 }
 
 export class ArtifactBuilder {
@@ -44,12 +45,7 @@ export class ArtifactBuilder {
     const contentHash = sha256(normalized);
     const quality = assessQuality(payload, normalized, { maxOutputBytes }, indexed.entries.length);
     const frontmatter = rawFrontmatter(manifest, parser, payload, contentHash);
-    const header = yaml.dump(frontmatter, {
-      lineWidth: -1,
-      noRefs: true,
-      sortKeys: false,
-      quotingType: "\""
-    }).trimEnd();
+    const header = stringifyYaml(frontmatter);
     const artifact = `---\n${header}\n---\n${normalized}`;
     return {
       artifactSchemaVersion: 3,
@@ -58,7 +54,11 @@ export class ArtifactBuilder {
       contentHash,
       artifactHash: sha256(artifact),
       assets,
-      quality
+      quality,
+      ...((manifest.source.kind === "audio" || manifest.source.kind === "video")
+        && typeof payload.metadata.title === "string"
+        ? { suggestedBasename: payload.metadata.title }
+        : {})
     };
   }
 }
@@ -81,6 +81,7 @@ function buildAssets(
       mime: asset.mime,
       path: `${rawRoot.replace(/\/+$/, "")}/assets/${manifest.sourceId}/${asset.assetId}.${extension}`,
       hash: sha256(asset.bytes),
+      source: asset.source,
       bytes: asset.bytes
     };
   });
@@ -138,6 +139,16 @@ function rawFrontmatter(
   if (safeUri) output.source_uri = safeUri;
   if (manifest.source.capturedAt) output.captured_at = manifest.source.capturedAt;
   for (const key of ["title", "author", "published", "created", "description", "tags"] as const) {
+    const value = payload.metadata[key];
+    if (value !== undefined) output[key] = value;
+  }
+  for (const key of [
+    "source_platform", "bilibili_bvid", "bilibili_cid", "bilibili_page", "douyin_video_id",
+    "transcript_language", "transcript_kind", "transcript_provider",
+    "transcript_model", "transcript_generated", "duration_ms",
+    "visual_extractor", "ffmpeg_version", "visual_model", "visual_frame_count",
+    "author_id", "content_title", "title_generated", "title_model"
+  ] as const) {
     const value = payload.metadata[key];
     if (value !== undefined) output[key] = value;
   }

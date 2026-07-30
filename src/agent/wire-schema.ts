@@ -28,7 +28,11 @@ export function compileWireSchema(schema: Record<string, unknown>): Record<strin
 }
 
 export function normalizeStructuredOutput<T = unknown>(value: T): T {
-  if (Array.isArray(value)) return value.map((item) => normalizeStructuredOutput(item)) as T;
+  if (Array.isArray(value)) {
+    const normalized: unknown[] = [];
+    for (const item of value as unknown[]) normalized.push(normalizeStructuredOutput<unknown>(item));
+    return normalized as T;
+  }
   if (!value || typeof value !== "object") return value;
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {

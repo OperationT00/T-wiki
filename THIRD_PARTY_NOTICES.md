@@ -46,10 +46,10 @@ upstream repository and at <https://www.apache.org/licenses/LICENSE-2.0>.
 [fflate](https://github.com/101arrowz/fflate), version 0.8.x,
 Copyright (c) 2020 Arjun Barrett, is distributed under the MIT License.
 
-## js-yaml
+## YAML
 
-[js-yaml](https://github.com/nodeca/js-yaml), version 4.x, is distributed
-under the MIT License.
+[yaml](https://github.com/eemeli/yaml), version 2.x, is distributed under
+the ISC License.
 
 ## jsonrepair
 
@@ -66,3 +66,19 @@ warranty of any kind.
 The production build uses esbuild `legalComments: "eof"` so dependency license
 comments that are present in bundled source remain attached to `main.js`.
 The complete upstream license files remain authoritative.
+
+## Bilibili Obsidian Clipper reference
+
+The public-caption acquisition design was informed by
+[Bilibili Obsidian Clipper](https://github.com/haixiong1997/Bilibili-Obsidian-Clipper),
+an MIT-licensed project. T-Wiki uses its own restricted networking and storage
+implementation and does not require cookies or browser-session credentials.
+
+## yt-dlp optional external tool
+
+T-Wiki can invoke a user-installed copy of
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) to acquire public Douyin videos.
+yt-dlp is not bundled with or redistributed by this plugin. It is licensed
+under The Unlicense; optional components used by yt-dlp may have their own
+licenses. Users are responsible for installing the tool and for complying
+with the source platform's terms and applicable copyright law.

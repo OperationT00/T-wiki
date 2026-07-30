@@ -4,6 +4,7 @@ import * as https from "node:https";
 import { BlockList, isIP } from "node:net";
 import type { Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
+import { clearAppTimeout, setAppTimeout } from "../utils/timers";
 
 export interface WebPageFetchResult {
   requestedUrl: string;
@@ -244,11 +245,11 @@ async function readResponseBytes(
     const abort = (): void => {
       stream.destroy(new WebCaptureError("WEB_FETCH_CANCELLED", "网页抓取已取消", true));
     };
-    const timeout = setTimeout(() => {
+    const timeout = setAppTimeout(() => {
       stream.destroy(new WebCaptureError("WEB_FETCH_TIMEOUT", "网页抓取超时", true));
     }, timeoutMs);
     const cleanup = (): void => {
-      clearTimeout(timeout);
+      clearAppTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     };
     signal?.addEventListener("abort", abort, { once: true });

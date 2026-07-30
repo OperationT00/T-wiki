@@ -1,5 +1,6 @@
 import { estimateTokens, truncateToTokenBudget } from "../core/context-budget";
 import { extractJsonObject } from "../core/wiki-core";
+import { clearAppTimeout, setAppTimeout } from "../utils/timers";
 import type {
   AgentBudget,
   AgentConversationContent,
@@ -173,7 +174,7 @@ export class AgentLoop {
     };
     let wallTimedOut = false;
     const abort = () => void runtime.cancel();
-    const wallTimer = setTimeout(() => {
+    const wallTimer = setAppTimeout(() => {
       wallTimedOut = true;
       void runtime.cancel();
     }, options.budget.maxWallTimeMs);
@@ -377,7 +378,7 @@ export class AgentLoop {
       }
       throw failure;
     } finally {
-      clearTimeout(wallTimer);
+      clearAppTimeout(wallTimer);
       options.signal?.removeEventListener("abort", abort);
       cache.clear();
       await runtime.dispose();
@@ -549,17 +550,20 @@ function limitResult(output: unknown, maxTokens: number): unknown {
 function summarizeToolInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { type: typeof input };
   const safeKeys = new Set(["sourceId", "contentHash", "sectionId", "path", "baseHash", "type", "scope", "direction"]);
-  return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([key, value]) => {
+  const summary: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
     if (key === "group" && value && typeof value === "object" && !Array.isArray(value)) {
       const group = value as Record<string, unknown>;
-      return [key, { type: group.type, tag: group.tag }];
+      summary[key] = { type: group.type, tag: group.tag };
+      continue;
     }
-    if ((key === "depth" || key === "limit") && typeof value === "number") return [key, value];
-    if (safeKeys.has(key) && typeof value === "string") return [key, value];
-    if (Array.isArray(value)) return [key, { count: value.length }];
-    if (typeof value === "string") return [key, { characters: value.length }];
-    return [key, typeof value];
-  }));
+    if ((key === "depth" || key === "limit") && typeof value === "number") summary[key] = value;
+    else if (safeKeys.has(key) && typeof value === "string") summary[key] = value;
+    else if (Array.isArray(value)) summary[key] = { count: value.length };
+    else if (typeof value === "string") summary[key] = { characters: value.length };
+    else summary[key] = typeof value;
+  }
+  return summary;
 }
 
 function asRecord(input: unknown): Record<string, unknown> {

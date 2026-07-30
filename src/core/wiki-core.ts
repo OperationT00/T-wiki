@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import yaml from "js-yaml";
 import { jsonrepair } from "jsonrepair";
+
+import { parseYaml, stringifyYaml } from "../utils/yaml";
 
 import {
   hasManagedRelatedSection,
@@ -48,7 +49,7 @@ const TYPE_DIR: Record<WikiPageType, string> = {
 };
 
 export const DEFAULT_CONFIG: WikiConfig = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   name: "LLM Wiki",
   domain: "Java 后端",
   audience: "准备技术面试的开发者",
@@ -66,6 +67,7 @@ export const DEFAULT_CONFIG: WikiConfig = {
   },
   parsing: {
     maxImportBytes: 50 * 1024 * 1024,
+    maxMediaImportBytes: 500 * 1024 * 1024,
     maxOutputBytes: 20 * 1024 * 1024,
     timeoutMs: 120_000,
     providers: {
@@ -109,6 +111,52 @@ export const DEFAULT_CONFIG: WikiConfig = {
           isOcr: true,
           pollIntervalMs: 2000,
           taskTimeoutMs: 600000
+        }
+      },
+      "bilibili-caption": {
+        enabled: true,
+        priority: 200,
+        options: {
+          maxPagesPerCapture: 100,
+          requestTimeoutMs: 30000
+        }
+      },
+      "media-transcription": {
+        enabled: false,
+        priority: 100,
+        options: {
+          protocol: "openai-transcriptions",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4o-mini-transcribe",
+          language: "auto",
+          vadFilter: true,
+          diarization: false,
+          maxUploadBytes: 25 * 1024 * 1024,
+          taskTimeoutMs: 3600000,
+          visual: {
+            enabled: false,
+            ffmpegPath: "",
+            sceneThreshold: 0.32,
+            minFrameGapSeconds: 8,
+            candidatesPerHour: 48,
+            maxCandidates: 96,
+            selectedPerHour: 16,
+            maxSelectedFrames: 64,
+            maxWidth: 1280,
+            imageFormat: "webp",
+            imageQuality: 82,
+            confidenceThreshold: 0.75,
+            maxAssetBytes: 32 * 1024 * 1024,
+            vision: {
+              protocol: "openai-chat-completions",
+              baseUrl: "",
+              model: "",
+              batchSize: 12,
+              timeoutMs: 120000,
+              maxRetries: 2,
+              captionLanguage: "auto"
+            }
+          }
         }
       }
     }
@@ -164,13 +212,7 @@ export function parseMarkdown(path: string, content: string): WikiPage | null {
 }
 
 export function stringifyMarkdown(frontmatter: Record<string, unknown>, body: string): string {
-  const rendered = yaml.dump(frontmatter, {
-    lineWidth: -1,
-    noRefs: true,
-    sortKeys: false,
-    quotingType: '"',
-    forceQuotes: false
-  }).trimEnd();
+  const rendered = stringifyYaml(frontmatter);
   return `---\n${rendered}\n---\n\n${body.trimStart()}`;
 }
 
@@ -342,7 +384,7 @@ export function normalizeWikiIdentity(value: string): string {
   return String(value ?? "")
     .normalize("NFKC")
     .toLocaleLowerCase()
-    .replace(/[\s·・,，.。:：;；'"“”‘’()（）\[\]【】/_-]+/gu, "")
+    .replace(/[\s·・,，.。:：;；'"“”‘’()（）[\]【】/_-]+/gu, "")
     .trim();
 }
 
@@ -626,7 +668,6 @@ export function isWritableWikiPath(path: string): boolean {
   return normalized.startsWith("wiki/")
     && !normalized.includes("../")
     && !normalized.startsWith("raw/")
-    && !normalized.startsWith(".obsidian/")
     && normalized !== "llm-wiki.config.json";
 }
 
@@ -717,7 +758,7 @@ function issue(
 
 function parseYamlFrontmatter(source: string): { value: Record<string, unknown>; repaired: boolean } | null {
   try {
-    return { value: (yaml.load(source) as Record<string, unknown>) ?? {}, repaired: false };
+    return { value: (parseYaml(source) as Record<string, unknown>) ?? {}, repaired: false };
   } catch {
     const repaired = source
       .replace(/^(\s*)-(\S)/gm, "$1- $2")
@@ -728,7 +769,7 @@ function parseYamlFrontmatter(source: string): { value: Record<string, unknown>;
       );
     if (repaired === source) return null;
     try {
-      return { value: (yaml.load(repaired) as Record<string, unknown>) ?? {}, repaired: true };
+      return { value: (parseYaml(repaired) as Record<string, unknown>) ?? {}, repaired: true };
     } catch {
       return null;
     }

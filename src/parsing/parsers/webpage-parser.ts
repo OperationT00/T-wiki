@@ -2,7 +2,7 @@ import Defuddle from "defuddle/full";
 
 import type { ParseIssue, ParsePayload, SourceMetadata } from "../../types";
 import type { DocumentParser, ParseContext, ParseInput, ProbeResult } from "../parser-types";
-import { ParserError, throwIfAborted } from "../parser-types";
+import { ParserError, parseInputSize, parseInputSource, throwIfAborted } from "../parser-types";
 
 const ACCESS_GATE = /(?:enable\s+javascript|javascript\s+(?:is\s+)?required|access\s+denied|captcha|cloudflare|checking\s+your\s+browser|verify\s+you\s+are\s+human|请启用\s*javascript|访问被拒绝|人机验证|安全验证)/i;
 
@@ -21,11 +21,11 @@ export class WebPageParser implements DocumentParser {
     }
   }
 
-  probe(input: ParseInput): ProbeResult {
+  async probe(input: ParseInput): Promise<ProbeResult> {
     const extensionMatch = input.extension === "html" || input.extension === "htm" || input.extension === "xhtml";
     const mimeMatch = /^text\/html(?:;|$)|^application\/xhtml\+xml(?:;|$)/i.test(input.mime)
       || /^text\/html(?:;|$)|^application\/xhtml\+xml(?:;|$)/i.test(input.captureContentType ?? "");
-    const magicMatch = looksLikeHtml(input.bytes);
+    const magicMatch = looksLikeHtml(await parseInputSource(input).readHead(2048));
     const supported = input.kind === "web" && (extensionMatch || mimeMatch || magicMatch);
     return {
       supported,
@@ -38,9 +38,14 @@ export class WebPageParser implements DocumentParser {
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
     throwIfAborted(context.signal);
     context.reportProgress({ phase: "decode", completed: 0, total: 3, message: "正在解码网页 HTML" });
-    const html = decodeHtml(input.bytes, input.captureContentType);
-    const Parser = globalThis.DOMParser;
-    if (!Parser) throw new ParserError("WEB_DOM_UNAVAILABLE", "当前 Obsidian 环境不支持 DOMParser");
+    const html = decodeHtml(
+      await parseInputSource(input).readAll(parseInputSize(input)),
+      input.captureContentType
+    );
+    if (typeof DOMParser === "undefined") {
+      throw new ParserError("WEB_DOM_UNAVAILABLE", "当前 Obsidian 环境不支持 DOMParser");
+    }
+    const Parser = DOMParser;
     const document = new Parser().parseFromString(html, "text/html");
     if (!document?.documentElement) throw new ParserError("WEB_HTML_INVALID", "网页 HTML 无法解析");
 

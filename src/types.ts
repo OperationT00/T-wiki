@@ -3,10 +3,10 @@ export type WikiPageType = typeof PAGE_TYPES[number];
 export type PageStatus = "stub" | "draft" | "reviewed";
 export type ParseStatus = "queued" | "parsing" | "needs_ocr" | "parsed" | "parse_failed";
 export type IngestStatus = "not_started" | "planning" | "awaiting_review" | "ingested" | "ingest_failed";
-export type SourceKind = "markdown" | "text" | "pdf" | "web" | "unknown";
+export type SourceKind = "markdown" | "text" | "pdf" | "web" | "audio" | "video" | "unknown";
 
 export interface WikiConfig {
-  schemaVersion: 3;
+  schemaVersion: 4;
   name: string;
   domain: string;
   audience: string;
@@ -24,6 +24,7 @@ export interface WikiConfig {
   };
   parsing: {
     maxImportBytes: number;
+    maxMediaImportBytes: number;
     maxOutputBytes: number;
     timeoutMs: number;
     providers: Record<string, ParserProviderConfig>;
@@ -71,6 +72,8 @@ export interface SourceSpan {
   block?: number;
   startLine?: number;
   endLine?: number;
+  startMs?: number;
+  endMs?: number;
   bbox?: [number, number, number, number];
   headingPath?: string[];
   selector?: string;
@@ -173,7 +176,7 @@ export interface ParseProgress {
   phase: string;
   completed?: number;
   total?: number;
-  unit?: "page" | "byte" | "document" | "item";
+  unit?: "page" | "byte" | "document" | "item" | "second";
   percent?: number;
   mode?: "determinate" | "indeterminate";
   precision?: "exact" | "stage";
@@ -234,6 +237,7 @@ export interface PublishedAsset {
   mime: string;
   path: string;
   hash: string;
+  source?: SourceSpan;
 }
 
 export interface IngestAttempt {
@@ -319,11 +323,15 @@ export interface SourceManifest {
     requestedUri?: string;
     capturedAt?: string;
     acquiredBy: string;
+    metadata?: SourceMetadata;
     capture?: {
-      status: number;
-      contentType: string;
+      status?: number;
+      contentType?: string;
       etag?: string;
       lastModified?: string;
+      platform?: "bilibili" | "douyin";
+      videoId?: string;
+      durationMs?: number;
     };
   };
   original: {
@@ -709,7 +717,7 @@ export interface AgentRuntime {
 }
 
 export interface PluginSettings {
-  schemaVersion: 5;
+  schemaVersion: 6;
   agent: {
     protocol: LlmProtocol;
     baseUrl: string;
@@ -728,6 +736,15 @@ export interface PluginSettings {
     enabled: boolean;
     inboxPath: string;
     scanExistingOnStartup: boolean;
+  };
+  onlineVideo: {
+    douyin: {
+      enabled: boolean;
+      ytDlpPath: string;
+      maxDownloadBytes: number;
+      taskTimeoutMs: number;
+      cookieBrowser: "edge" | "chrome" | "firefox";
+    };
   };
 }
 

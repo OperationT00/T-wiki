@@ -1,4 +1,5 @@
 import { estimateTokens, truncateToTokenBudget } from "../core/context-budget";
+import { clearAppTimeout, setAppTimeout } from "../utils/timers";
 import {
   makePageTemplate,
   normalizeVaultPath,
@@ -245,7 +246,7 @@ export class IngestCoordinator {
     };
     let wallTimedOut = false;
     const cancelRuntime = () => { for (const active of runtimes) void active.cancel(); };
-    const wallTimer = setTimeout(() => {
+    const wallTimer = setAppTimeout(() => {
       wallTimedOut = true;
       void runtime.cancel();
     }, input.budget.maxWallTimeMs);
@@ -409,7 +410,7 @@ export class IngestCoordinator {
       Object.defineProperty(failure as object, "agentTrace", { value: trace, configurable: true });
       throw failure;
     } finally {
-      clearTimeout(wallTimer);
+      clearAppTimeout(wallTimer);
       input.signal.removeEventListener("abort", cancelRuntime);
       await Promise.allSettled([...runtimes].map((active) => active.dispose()));
     }
@@ -443,7 +444,7 @@ export class IngestCoordinator {
       const map = new Map<string, string[]>();
       for (const value of arrayValue(result.sources)) {
         const item = recordValue(value);
-        map.set(String(item.sourceId ?? ""), stringArray(item.sectionIds));
+        map.set(scalarString(item.sourceId), stringArray(item.sectionIds));
       }
       return map;
     } catch (error) {
@@ -893,8 +894,8 @@ export class IngestCoordinator {
     const sourcePaths = new Map<string, string>();
     for (const source of state.sources) {
       const existingMatches = pages.filter((page) => page.type === "source"
-        && (String(page.frontmatter.raw_path ?? "") === source.input.rawPath
-          || String(page.frontmatter.raw_hash ?? "") === source.input.sourceHash));
+        && (scalarString(page.frontmatter.raw_path) === source.input.rawPath
+          || scalarString(page.frontmatter.raw_hash) === source.input.sourceHash));
       if (existingMatches.length > 1) throw new Error(`来源 ${source.sourceId} 匹配到多个 Source 页面`);
       const draft = source.draft ?? fallbackSourceDraft(source);
       const existing = existingMatches[0];
@@ -917,14 +918,14 @@ export class IngestCoordinator {
         title: draft.title,
         tldr: draft.tldr,
         status: "draft",
-        created: String(base.created ?? date),
+        created: scalarString(base.created, date),
         updated: date,
         tags: Array.isArray(base.tags) ? base.tags : [],
         related,
         source_type: metadataString(source.input.metadata?.source_type) || "article",
-        author: metadataAuthor(source.input.metadata?.author) || String(base.author ?? ""),
+        author: metadataAuthor(source.input.metadata?.author) || scalarString(base.author),
         url: safeSourceUrl(metadataString(source.input.metadata?.url) || metadataString(source.input.metadata?.source))
-          || String(base.url ?? ""),
+          || scalarString(base.url),
         raw_path: source.input.rawPath,
         raw_hash: source.input.sourceHash
       };
@@ -1193,14 +1194,14 @@ function applyAnalysis(state: IngestWorkState, input: Record<string, unknown>, l
   const sourceIds = new Set(state.sources.map((source) => source.sourceId));
   for (const item of arrayValue(input.sourceDrafts)) {
     const value = recordValue(item);
-    const source = state.sources.find((candidate) => candidate.sourceId === String(value.sourceId ?? ""));
+    const source = state.sources.find((candidate) => candidate.sourceId === scalarString(value.sourceId));
     if (!source) continue;
     source.draft = {
       sourceId: source.sourceId,
-      title: String(value.title ?? source.name).trim() || source.name,
-      slug: String(value.slug ?? ""),
-      tldr: String(value.tldr ?? "").trim() || `来源：${source.name}`,
-      body: String(value.body ?? "").trim() || `# ${source.name}`
+      title: scalarString(value.title, source.name).trim() || source.name,
+      slug: scalarString(value.slug),
+      tldr: scalarString(value.tldr).trim() || `来源：${source.name}`,
+      body: scalarString(value.body).trim() || `# ${source.name}`
     };
   }
   const seen = new Set<string>();
@@ -1229,12 +1230,12 @@ function applyAnalysis(state: IngestWorkState, input: Record<string, unknown>, l
   for (const source of state.sources) source.draft ??= fallbackSourceDraft(source);
   for (const item of arrayValue(input.categoryAssessments)) {
     const value = recordValue(item);
-    const source = state.sources.find((candidate) => candidate.sourceId === String(value.sourceId ?? ""));
-    const type = String(value.type ?? "") as KnowledgeCandidateState["proposedType"];
+    const source = state.sources.find((candidate) => candidate.sourceId === scalarString(value.sourceId));
+    const type = scalarString(value.type) as KnowledgeCandidateState["proposedType"];
     if (!source || !KNOWLEDGE_TYPES.includes(type)) continue;
     source.categoryAssessments[type] = {
       outcome: value.outcome === "candidates_found" ? "candidates_found" : "none",
-      reason: String(value.reason ?? "").trim()
+      reason: scalarString(value.reason).trim()
     };
   }
 }
@@ -1251,7 +1252,7 @@ function sourceAnalysisIssues(
     const unique = [...new Set(candidate.rawEvidenceIds)];
     for (const evidenceId of unique) {
       if (typeof evidenceId === "string" && !ledger.hasId(evidenceId)) {
-        normalizationIssues.push(`候选 ${String(candidate.candidateId ?? "(无 ID)")} 引用了未知 Evidence ID：${evidenceId}`);
+        normalizationIssues.push(`候选 ${scalarString(candidate.candidateId, "(无 ID)")} 引用了未知 Evidence ID：${evidenceId}`);
       }
     }
     // Evidence volume is a quality concern, not a reason to discard an entire
@@ -1264,9 +1265,9 @@ function sourceAnalysisIssues(
   const candidateCounts = new Map<string, number>();
   const candidateIds = new Set<string>();
   for (const candidate of candidates) {
-    const sourceId = String(candidate.sourceId ?? "");
-    const type = String(candidate.type ?? "");
-    const id = String(candidate.candidateId ?? "").trim();
+    const sourceId = scalarString(candidate.sourceId);
+    const type = scalarString(candidate.type);
+    const id = scalarString(candidate.candidateId).trim();
     if (!sourceIds.has(sourceId)) issues.push(`候选 ${id || "(无 ID)"} 引用了未知 sourceId`);
     if (candidateIds.has(id)) issues.push(`candidateId 重复：${id}`);
     if (id) candidateIds.add(id);
@@ -1277,15 +1278,15 @@ function sourceAnalysisIssues(
   }
   const assessmentKeys = new Set<string>();
   for (const assessment of arrayValue(input.categoryAssessments).map(recordValue)) {
-    const sourceId = String(assessment.sourceId ?? "");
-    const type = String(assessment.type ?? "");
+    const sourceId = scalarString(assessment.sourceId);
+    const type = scalarString(assessment.type);
     const key = `${sourceId}\u0000${type}`;
     if (assessmentKeys.has(key)) issues.push(`分类评估重复：${sourceId}/${type}`);
     assessmentKeys.add(key);
     const count = candidateCounts.get(key) ?? 0;
     if (assessment.outcome === "candidates_found" && count === 0) issues.push(`${sourceId}/${type} 声称发现候选但 candidates 中不存在`);
     if (assessment.outcome === "none" && count > 0) issues.push(`${sourceId}/${type} 声称无候选但 candidates 中存在 ${count} 项`);
-    if (!String(assessment.reason ?? "").trim()) issues.push(`${sourceId}/${type} 缺少评估理由`);
+    if (!scalarString(assessment.reason).trim()) issues.push(`${sourceId}/${type} 缺少评估理由`);
   }
   for (const source of state.sources) {
     for (const type of KNOWLEDGE_TYPES) {
@@ -1740,11 +1741,11 @@ function parseWikiLinkProposals(result: Record<string, unknown>): ProposedWikiRe
   return arrayValue(result.relations).map((value) => {
     const relation = recordValue(value);
     return {
-      fromCandidateId: String(relation.fromCandidateId ?? ""),
-      ...(relation.toCandidateId ? { toCandidateId: String(relation.toCandidateId) } : {}),
-      ...(relation.toWikiPath ? { toWikiPath: String(relation.toWikiPath) } : {}),
-      type: String(relation.type ?? "related") as ProposedWikiRelation["type"],
-      reason: String(relation.reason ?? relation.type ?? "related"),
+      fromCandidateId: scalarString(relation.fromCandidateId),
+      ...(relation.toCandidateId ? { toCandidateId: scalarString(relation.toCandidateId) } : {}),
+      ...(relation.toWikiPath ? { toWikiPath: scalarString(relation.toWikiPath) } : {}),
+      type: scalarString(relation.type, "related") as ProposedWikiRelation["type"],
+      reason: scalarString(relation.reason, scalarString(relation.type, "related")),
       confidence: Number(relation.confidence)
     };
   });
@@ -1948,8 +1949,14 @@ function enumSchema(values: readonly string[]): Record<string, unknown> {
   return { type: "string", enum: [...values] };
 }
 
-function recordValue(value: unknown): Record<string, any> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function scalarString(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
 }
 
 function arrayValue(value: unknown): unknown[] {

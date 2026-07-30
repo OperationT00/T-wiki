@@ -101,7 +101,7 @@ export class WorkingSet {
   async replace(path: string, content: string, evidence: EvidenceReference[] = []): Promise<StagedWikiPage> {
     this.assertMutable();
     path = assertStagedPath(path);
-    const page = this.require(path);
+    const page = this.requirePage(path);
     if (!content.trim()) throw new Error(`WorkingSet 替换内容不能为空：${path}`);
     if (page.currentContent === content && evidence.length === 0) return structuredClone(page);
     page.currentContent = content;
@@ -120,7 +120,7 @@ export class WorkingSet {
     removedLines: number;
     diff?: string;
   }> {
-    const pages = path ? [this.require(path)] : [...this.pages.values()];
+    const pages = path ? [this.requirePage(path)] : [...this.pages.values()];
     return pages.map((page) => {
       const diff = simpleDiff(page.originalContent ?? "", page.currentContent);
       const lines = diff.split("\n");
@@ -204,7 +204,7 @@ export class WorkingSet {
     }
   }
 
-  private require(path: string): StagedWikiPage {
+  private requirePage(path: string): StagedWikiPage {
     const value = this.pages.get(path);
     if (!value) throw new Error(`WorkingSet 中没有页面：${path}`);
     return value;

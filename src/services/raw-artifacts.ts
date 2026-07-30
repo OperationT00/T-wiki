@@ -1,7 +1,8 @@
-import yaml from "js-yaml";
 import type { DataAdapter } from "obsidian";
 
 import { normalizeVaultPath, sha256 } from "../core/wiki-core";
+import { parseYaml } from "../utils/yaml";
+import { replaceUnsafeFilenameCharacters } from "../utils/text-safety";
 import type {
   DocumentSourceMap,
   ParseIssue,
@@ -35,8 +36,13 @@ export class RawPublisher {
   ): Promise<PublishedRawArtifact> {
     const folder = manifest.source.kind === "pdf"
       ? `${this.rawRoot}/documents`
-      : `${this.rawRoot}/articles`;
-    const basename = canonicalBasename(manifest.original.name);
+      : manifest.source.kind === "audio"
+        ? `${this.rawRoot}/audio`
+        : manifest.source.kind === "video"
+          ? `${this.rawRoot}/videos`
+          : `${this.rawRoot}/articles`;
+    const basename = stablePublishedBasename(manifest)
+      ?? canonicalBasename(built.suggestedBasename ?? manifest.original.name);
     const revisionSuffix = revision > 1 ? `--r${revision}` : "";
     const rawPath = normalizeVaultPath(
       `${folder}/${basename}--${manifest.sourceHash.slice(0, 8)}${revisionSuffix}.md`
@@ -123,7 +129,7 @@ export class RawVerifier {
     }
     const match = artifact.match(RAW_FRONTMATTER);
     if (!match?.[1]) throw new Error(`raw frontmatter 无效：${revision.rawPath}`);
-    const frontmatter = (yaml.load(match[1]) as Record<string, unknown>) ?? {};
+    const frontmatter = (parseYaml(match[1]) as Record<string, unknown>) ?? {};
     if (String(frontmatter.kind) !== "raw_document") throw new Error("raw kind 无效");
     if (String(frontmatter.source_id) !== manifest.sourceId) throw new Error("raw source_id 不一致");
     if (String(frontmatter.source_hash) !== manifest.sourceHash) throw new Error("raw source_hash 不一致");
@@ -292,15 +298,25 @@ export function currentRevision(manifest: SourceManifest): ParseRevision | undef
 
 export function canonicalBasename(name: string): string {
   const withoutExtension = name.replace(/\.[^.]+$/, "");
-  return withoutExtension
+  return replaceUnsafeFilenameCharacters(withoutExtension
     .normalize("NFC")
     .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+  )
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^[.-]+|[.-]+$/g, "")
     .toLocaleLowerCase()
     .slice(0, 100) || "document";
+}
+
+function stablePublishedBasename(manifest: SourceManifest): string | undefined {
+  const first = [...manifest.parse.revisions]
+    .sort((left, right) => left.revision - right.revision)[0];
+  const filename = first?.rawPath.split("/").at(-1);
+  if (!filename) return undefined;
+  const suffix = new RegExp(`--${manifest.sourceHash.slice(0, 8)}(?:--r\\d+)?\\.md$`, "i");
+  const basename = filename.replace(suffix, "");
+  return basename !== filename && basename ? basename : undefined;
 }
 
 async function listFilesRecursive(adapter: DataAdapter, root: string): Promise<string[]> {

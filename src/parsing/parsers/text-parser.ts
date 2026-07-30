@@ -1,6 +1,6 @@
 import type { ParsePayload } from "../../types";
 import { decodeText, normalizeMarkdownBody } from "../normalizer";
-import type { DocumentParser, ParseContext, ParseInput, ProbeResult } from "../parser-types";
+import { parseInputSize, parseInputSource, type DocumentParser, type ParseContext, type ParseInput, type ProbeResult } from "../parser-types";
 
 export class TextParser implements DocumentParser {
   readonly descriptor = {
@@ -22,14 +22,16 @@ export class TextParser implements DocumentParser {
   }
 
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
+    const size = parseInputSize(input);
+    const bytes = await parseInputSource(input).readAll(size);
     context.reportProgress({
       phase: "parsing",
       completed: 0,
-      total: Math.max(1, input.bytes.length),
+      total: Math.max(1, size),
       unit: "byte",
       message: "正在解码文本"
     });
-    const decoded = decodeText(input.bytes);
+    const decoded = decodeText(bytes);
     const body = normalizeMarkdownBody(
       decoded
         .replace(/\r\n?/g, "\n")
@@ -40,8 +42,8 @@ export class TextParser implements DocumentParser {
     );
     context.reportProgress({
       phase: "parsing",
-      completed: Math.max(1, input.bytes.length),
-      total: Math.max(1, input.bytes.length),
+      completed: Math.max(1, size),
+      total: Math.max(1, size),
       unit: "byte",
       message: "文本解析完成"
     });

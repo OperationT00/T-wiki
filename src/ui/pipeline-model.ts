@@ -36,7 +36,8 @@ export function sourcePipelineSteps(
 function parseState(status: SourceManifest["parse"]["status"]): PipelineStepState {
   if (status === "parsed") return "completed";
   if (status === "parse_failed" || status === "needs_ocr") return "failed";
-  return "active";
+  if (status === "parsing") return "active";
+  return "pending";
 }
 
 function ingestState(

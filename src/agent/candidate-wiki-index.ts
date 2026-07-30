@@ -94,7 +94,7 @@ function queryTerms(values: string[]): string[] {
   const terms = values.flatMap((value) => value
     .normalize("NFKC")
     .toLocaleLowerCase()
-    .split(/[\s,，.。:：;；/|()（）\[\]【】_-]+/u)
+    .split(/[\s,，.。:：;；/|()（）[\]【】_-]+/u)
     .map((term) => term.trim())
     .filter((term) => term.length >= 2));
   return [...new Set(terms)].slice(0, 20);

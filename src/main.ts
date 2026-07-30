@@ -5,6 +5,7 @@ import {
   type StoredPluginSettings
 } from "./agent/agent-settings";
 import { EmbeddedAgentRuntimeFactory } from "./agent/runtime-factory";
+import { AgentTranscriptTitleGenerator } from "./agent/transcript-title-generator";
 import {
   FilePickerConnector,
   UrlCaptureConnector,
@@ -12,9 +13,19 @@ import {
   type ConnectorScanResult,
   type UrlCaptureResult
 } from "./connectors/source-connector";
+import { BilibiliVideoConnector } from "./connectors/bilibili-video-connector";
+import {
+  DouyinVideoConnector,
+  type DouyinCapturePhase,
+  type DouyinCaptureResult
+} from "./connectors/douyin-video-connector";
+import type { YtDlpDownloadProgress, YtDlpInfo } from "./connectors/yt-dlp";
+import { UrlCaptureRouter } from "./connectors/url-capture-router";
 import { SafeWebPageFetcher, validateWebUrl } from "./connectors/web-page-fetcher";
 import { createDefaultParserRegistry } from "./parsing/default-parser-registry";
 import type { MinerUProtocol } from "./parsing/parsers/mineru-parser";
+import { InMemoryMediaUploadConsent } from "./parsing/parsers/media-transcription-parser";
+import type { TranscriptionProtocol } from "./parsing/media/transcript-types";
 import { ObsidianHttpClient } from "./services/obsidian-http-client";
 import { SecretStore } from "./services/secret-store";
 import { WikiService, type MigrationPreview } from "./services/wiki-service";
@@ -26,6 +37,9 @@ import { VIEW_TYPE_LLM_WIKI, WorkbenchView } from "./ui/workbench-view";
 
 export const MINERU_CLOUD_SECRET_ID = "t-wiki-mineru-cloud-token";
 export const MINERU_SELF_HOSTED_SECRET_ID = "t-wiki-mineru-self-hosted-token";
+export const MEDIA_OPENAI_SECRET_ID = "t-wiki-media-openai-token";
+export const MEDIA_WHISPER_SECRET_ID = "t-wiki-media-whisper-token";
+export const VIDEO_VISION_SECRET_ID = "t-wiki-video-vision-token";
 
 export default class LLMWikiPlugin extends Plugin {
   declare settings: PluginSettings;
@@ -33,13 +47,19 @@ export default class LLMWikiPlugin extends Plugin {
   secrets!: SecretStore;
   workflows!: WorkflowService;
   private readonly filePicker = new FilePickerConnector();
-  private readonly urlCapture = new UrlCaptureConnector(new SafeWebPageFetcher());
+  private readonly webUrlCapture = new UrlCaptureConnector(new SafeWebPageFetcher());
+  private readonly bilibiliCapture = new BilibiliVideoConnector();
+  private readonly douyinCapture = new DouyinVideoConnector();
+  private readonly urlCapture = new UrlCaptureRouter(this.webUrlCapture, this.bilibiliCapture, this.douyinCapture);
+  readonly mediaUploadConsent = new InMemoryMediaUploadConsent();
   private webClipper?: WebClipperInboxConnector;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.secrets = new SecretStore(this.app);
     const http = new ObsidianHttpClient();
+    const runtimeFactory = new EmbeddedAgentRuntimeFactory(this.secrets, () => this.settings);
+    const transcriptTitleGenerator = new AgentTranscriptTitleGenerator(runtimeFactory, () => this.settings);
     this.wiki = new WikiService(this.app, () => createDefaultParserRegistry({
       mineru: {
         http,
@@ -48,9 +68,20 @@ export default class LLMWikiPlugin extends Plugin {
             protocol === "cloud-v4" ? MINERU_CLOUD_SECRET_ID : MINERU_SELF_HOSTED_SECRET_ID
           )
         }
+      },
+      media: {
+        consent: this.mediaUploadConsent,
+        credentials: {
+          getToken: (protocol: TranscriptionProtocol) => this.secrets.get(
+            protocol === "openai-transcriptions" ? MEDIA_OPENAI_SECRET_ID : MEDIA_WHISPER_SECRET_ID
+          )
+        },
+        visionCredentials: {
+          getToken: () => this.secrets.get(VIDEO_VISION_SECRET_ID)
+        },
+        titleGenerator: transcriptTitleGenerator
       }
     }));
-    const runtimeFactory = new EmbeddedAgentRuntimeFactory(this.secrets, () => this.settings);
     this.workflows = new WorkflowService(this.wiki, runtimeFactory, () => this.settings);
     this.registerEvent(this.app.vault.on("create", (file) => {
       if (file.path.endsWith(".md")) this.wiki.markNavigationIndexDirty(file.path);
@@ -66,7 +97,9 @@ export default class LLMWikiPlugin extends Plugin {
       if (oldPath.endsWith(".md")) this.wiki.markNavigationIndexDirty(oldPath);
     }));
     await this.filePicker.start(this.connectorContext());
-    await this.urlCapture.start(this.connectorContext());
+    await this.webUrlCapture.start(this.connectorContext());
+    await this.bilibiliCapture.start(this.connectorContext());
+    await this.douyinCapture.start(this.connectorContext());
 
     this.registerView(VIEW_TYPE_LLM_WIKI, (leaf: WorkspaceLeaf) => new WorkbenchView(leaf, this));
     this.addRibbonIcon("library-big", "打开 T-Wiki", () => void this.openWorkbench());
@@ -83,9 +116,13 @@ export default class LLMWikiPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.wiki?.dispose();
     void this.workflows?.dispose();
     void this.filePicker.stop();
-    void this.urlCapture.stop();
+    void this.webUrlCapture.stop();
+    void this.bilibiliCapture.stop();
+    void this.douyinCapture.stop();
+    this.mediaUploadConsent.clear();
     void this.webClipper?.stop();
   }
 
@@ -96,16 +133,93 @@ export default class LLMWikiPlugin extends Plugin {
   async captureUrl(
     url: string,
     signal?: AbortSignal,
-    reportProgress?: (phase: "download" | "parse" | "complete") => void
+    reportProgress?: (phase: "download" | "parse" | "complete") => void,
+    bilibili?: { pages?: "current" | "all" | number[]; language?: string },
+    mode: "web" | "video" = bilibili ? "video" : "web"
   ): Promise<UrlCaptureResult> {
     if (!(await this.wiki.isInitialized())) throw new Error("请先初始化 T-Wiki");
     if (await this.wiki.requiresParsingMigration()) throw new Error("请先迁移解析配置");
-    return this.urlCapture.capture({ url, signal, reportProgress });
+    return this.urlCapture.capture({
+      url,
+      mode,
+      signal,
+      reportProgress,
+      bilibiliPages: bilibili?.pages,
+      bilibiliLanguage: bilibili?.language
+    });
+  }
+
+  async testDouyinYtDlp(signal = new AbortController().signal): Promise<YtDlpInfo> {
+    const settings = this.settings.onlineVideo.douyin;
+    return this.douyinCapture.testInstallation(settings, signal);
+  }
+
+  async captureDouyinWithTranscription(
+    url: string,
+    useBrowserCookies: boolean,
+    signal?: AbortSignal,
+    reportProgress?: (phase: DouyinCapturePhase, progress?: YtDlpDownloadProgress) => void
+  ): Promise<DouyinCaptureResult> {
+    if (!(await this.wiki.isInitialized())) throw new Error("请先初始化 T-Wiki");
+    if (await this.wiki.requiresParsingMigration()) throw new Error("请先迁移解析配置");
+    const config = await this.wiki.loadConfig();
+    const provider = config.parsing.providers["media-transcription"];
+    if (!provider?.enabled) throw new Error("请先在设置中启用音视频远程转写");
+    const visual = provider.options.visual && typeof provider.options.visual === "object"
+      ? provider.options.visual as Record<string, unknown>
+      : {};
+    const captured = await this.urlCapture.captureDouyin({
+      url,
+      signal,
+      reportProgress,
+      options: {
+        ...this.settings.onlineVideo.douyin,
+        useBrowserCookies,
+        ffmpegPath: String(visual.ffmpegPath ?? "")
+      }
+    });
+    this.mediaUploadConsent.approve(captured.manifest.sourceId);
+    const unsubscribeProgress = await this.wiki.subscribeParseProgress((event) => {
+      if (event.sourceId !== captured.manifest.sourceId) return;
+      const phase = DOUYIN_PARSE_PHASES[event.phase];
+      if (phase) reportProgress?.(phase);
+    });
+    const abortParse = (): void => { void this.wiki.cancelParse(captured.manifest.sourceId); };
+    signal?.addEventListener("abort", abortParse, { once: true });
+    try {
+      if (signal?.aborted) throw new Error("抖音视频处理已取消");
+      const manifest = await this.wiki.reparseSourceWith(captured.manifest.sourceId, "media-transcription");
+      reportProgress?.("complete");
+      return { ...captured, manifest };
+    } catch (error) {
+      this.mediaUploadConsent.revoke(captured.manifest.sourceId);
+      throw error;
+    } finally {
+      unsubscribeProgress();
+      signal?.removeEventListener("abort", abortParse);
+    }
+  }
+
+  async captureBilibiliWithTranscription(
+    url: string,
+    signal?: AbortSignal,
+    reportProgress?: (downloaded: number, total?: number) => void
+  ): Promise<import("./types").SourceManifest> {
+    const config = await this.wiki.loadConfig();
+    const provider = config.parsing.providers["media-transcription"];
+    if (!provider?.enabled) throw new Error("请先在设置中启用音视频远程转写");
+    const manifest = await this.bilibiliCapture.captureAudioForTranscription(
+      url,
+      signal ?? new AbortController().signal,
+      reportProgress
+    );
+    this.mediaUploadConsent.approve(manifest.sourceId);
+    return this.wiki.reparseSourceWith(manifest.sourceId, "media-transcription");
   }
 
   async openUrlInBrowser(input: string): Promise<void> {
     const url = validateWebUrl(input);
-    const electron = require("electron") as { shell: { openExternal(url: string): Promise<void> } };
+    const electron = await import("electron");
     await electron.shell.openExternal(url.toString());
   }
 
@@ -153,7 +267,7 @@ export default class LLMWikiPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) as StoredPluginSettings | null;
     this.settings = normalizePluginSettings(data);
-    if (data && (data.schemaVersion !== 5 || !data.agent)) await this.saveData(this.settings);
+    if (data && (data.schemaVersion !== 6 || !data.agent)) await this.saveData(this.settings);
     if (!this.settings.activeSessionId || !this.settings.sessions.some((item) => item.id === this.settings.activeSessionId)) {
       const session = createSession();
       this.settings.sessions.unshift(session);
@@ -164,6 +278,7 @@ export default class LLMWikiPlugin extends Plugin {
   private connectorContext(): import("./connectors/source-connector").SourceConnectorContext {
     return {
       importSource: (name, bytes, provenance) => this.wiki.importSourceDetailed(name, bytes, provenance),
+      importSourceBody: (name, source, provenance) => this.wiki.importSourceDetailed(name, source, provenance),
       reportError: (connectorId, path, error) => {
         new Notice(`${connectorId} 导入失败：${path} · ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -271,9 +386,34 @@ export default class LLMWikiPlugin extends Plugin {
       }
     });
     this.addCommand({
+      id: "import-audio-video",
+      name: "导入音视频",
+      callback: () => {
+        const input = createEl("input");
+        input.type = "file";
+        input.multiple = true;
+        input.accept = "audio/*,video/*,.mkv,.avi,.flac,.ogg,.m4a,.webm";
+        input.onchange = () => void this.importFiles(Array.from(input.files ?? []))
+          .then(async () => {
+            this.settings.activeTab = "materials";
+            await this.saveSettings();
+            await this.openWorkbench();
+            await this.refreshView();
+            new Notice("媒体原件已保存；请在素材页确认远程转写");
+          })
+          .catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+        input.click();
+      }
+    });
+    this.addCommand({
       id: "capture-web-page",
-      name: "抓取网页",
-      callback: () => new UrlCaptureModal(this).open()
+      name: "抓取网页正文",
+      callback: () => new UrlCaptureModal(this, "web").open()
+    });
+    this.addCommand({
+      id: "capture-online-video",
+      name: "解析在线视频",
+      callback: () => new UrlCaptureModal(this, "video").open()
     });
     this.addCommand({
       id: "scan-materials",
@@ -359,6 +499,20 @@ export default class LLMWikiPlugin extends Plugin {
     });
   }
 }
+
+const DOUYIN_PARSE_PHASES: Readonly<Record<string, DouyinCapturePhase>> = {
+  uploading: "uploading",
+  transcribing: "transcribing",
+  "reading-media-info": "reading-media-info",
+  "extracting-frames": "extracting-frames",
+  "filtering-frames": "filtering-frames",
+  "visual-analysis": "visual-analysis",
+  "building-markdown": "building-markdown",
+  "quality-check": "quality-check",
+  publishing: "publishing",
+  verifying: "verifying",
+  completed: "complete"
+};
 
 function createSession(): ChatSession {
   const now = new Date().toISOString();

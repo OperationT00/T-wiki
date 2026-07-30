@@ -1,8 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { open as openFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { DataAdapter } from "obsidian";
 
 import { normalizeVaultPath, sha256 } from "../core/wiki-core";
 import type { DocumentSourceMap, SourceKind, SourceManifest } from "../types";
+import { ParserError, type SourceBody } from "../parsing/parser-types";
 
 export class ObjectStore {
   constructor(
@@ -36,6 +40,38 @@ export class ObjectStore {
     return path;
   }
 
+  async putBody(sourceHash: string, extension: string, source: SourceBody): Promise<string> {
+    const safeExtension = extension.replace(/[^a-z0-9]/gi, "").toLocaleLowerCase() || "bin";
+    const folder = `${this.root}/${sourceHash.slice(0, 2)}`;
+    await ensureFolder(this.adapter, folder);
+    const path = `${folder}/${sourceHash}.${safeExtension}`;
+    if (await this.adapter.exists(path)) {
+      const existingHash = await hashAdapterFile(this.adapter, path);
+      if (existingHash !== sourceHash) throw new Error(`Object hash conflict: ${path}`);
+      return path;
+    }
+    const basePath = adapterBasePath(this.adapter);
+    if (!basePath) return this.put(sourceHash, extension, await source.readAll(source.size ?? Number.MAX_SAFE_INTEGER));
+    const temp = `${path}.${randomUUID()}.tmp`;
+    const absoluteTemp = safeAbsolutePath(basePath, temp);
+    const writer = createWriteStream(absoluteTemp, { flags: "wx" });
+    const hash = createHash("sha256");
+    try {
+      for await (const chunk of source.openStream()) {
+        hash.update(chunk);
+        if (!writer.write(chunk)) await onceDrain(writer);
+      }
+      await closeWriter(writer);
+      if (hash.digest("hex") !== sourceHash) throw new Error("SOURCE_HASH_MISMATCH");
+      await this.adapter.rename(temp, path);
+      return path;
+    } catch (error) {
+      writer.destroy();
+      if (await this.adapter.exists(temp)) await this.adapter.remove(temp);
+      throw error;
+    }
+  }
+
   async read(manifest: SourceManifest): Promise<Uint8Array> {
     const path = normalizeVaultPath(manifest.original.objectPath);
     if (!path.startsWith(`${this.root}/`) || path.split("/").includes("..")) {
@@ -46,9 +82,102 @@ export class ObjectStore {
     return bytes;
   }
 
+  async body(manifest: SourceManifest): Promise<SourceBody> {
+    const path = this.assertObjectPath(manifest.original.objectPath);
+    const basePath = adapterBasePath(this.adapter);
+    const readAllVerified = async (maxBytes: number): Promise<Uint8Array> => {
+      if (manifest.original.size > maxBytes) {
+        throw new ParserError("FILE_TOO_LARGE", `Source exceeds ${maxBytes} bytes`);
+      }
+      const bytes = new Uint8Array(await this.adapter.readBinary(path));
+      if (sha256(bytes) !== manifest.sourceHash) throw new Error("SOURCE_HASH_MISMATCH");
+      return bytes;
+    };
+    return {
+      size: manifest.original.size,
+      readHead: async (maxBytes) => {
+        if (!basePath) return (await readAllVerified(manifest.original.size)).slice(0, maxBytes);
+        const handle = await openFile(safeAbsolutePath(basePath, path), "r");
+        try {
+          const buffer = new Uint8Array(Math.min(maxBytes, manifest.original.size));
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+          return buffer.slice(0, bytesRead);
+        } finally {
+          await handle.close();
+        }
+      },
+      readAll: readAllVerified,
+      openStream: async function* () {
+        if (!basePath) {
+          yield await readAllVerified(manifest.original.size);
+          return;
+        }
+        const hash = createHash("sha256");
+        for await (const chunk of createReadStream(safeAbsolutePath(basePath, path))) {
+          const bytes = new Uint8Array(chunk as Buffer);
+          hash.update(bytes);
+          yield bytes;
+        }
+        if (hash.digest("hex") !== manifest.sourceHash) throw new Error("SOURCE_HASH_MISMATCH");
+      }
+    };
+  }
+
+  async verify(manifest: SourceManifest): Promise<void> {
+    const source = await this.body(manifest);
+    for await (const _chunk of source.openStream()) {
+      // Hash verification is performed by SourceBody after its final chunk.
+    }
+  }
+
+  private assertObjectPath(value: string): string {
+    const path = normalizeVaultPath(value);
+    if (!path.startsWith(`${this.root}/`) || path.split("/").includes("..")) {
+      throw new Error(`Object path escapes store: ${value}`);
+    }
+    return path;
+  }
+
   private get root(): string {
     return `${normalizeVaultPath(this.internalRoot)}/objects/sha256`;
   }
+}
+
+function adapterBasePath(adapter: DataAdapter): string | undefined {
+  const value = (adapter as DataAdapter & { getBasePath?: () => string }).getBasePath?.();
+  return typeof value === "string" && value.length > 0 ? resolve(value) : undefined;
+}
+
+async function hashAdapterFile(adapter: DataAdapter, path: string): Promise<string> {
+  const basePath = adapterBasePath(adapter);
+  if (!basePath) return sha256(new Uint8Array(await adapter.readBinary(path)));
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(safeAbsolutePath(basePath, path))) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+function safeAbsolutePath(basePath: string, vaultPath: string): string {
+  const absolute = resolve(basePath, ...normalizeVaultPath(vaultPath).split("/"));
+  const root = `${resolve(basePath)}${process.platform === "win32" ? "\\" : "/"}`.toLocaleLowerCase();
+  if (!`${absolute}${absolute.endsWith("/") || absolute.endsWith("\\") ? "" : process.platform === "win32" ? "\\" : "/"}`
+    .toLocaleLowerCase().startsWith(root)) {
+    throw new Error("OBJECT_PATH_OUTSIDE_VAULT");
+  }
+  return absolute;
+}
+
+function onceDrain(writer: ReturnType<typeof createWriteStream>): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    writer.once("drain", resolvePromise);
+    writer.once("error", reject);
+  });
+}
+
+function closeWriter(writer: ReturnType<typeof createWriteStream>): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    writer.once("error", reject);
+    writer.end(resolvePromise);
+  });
 }
 
 export class ManifestRepository {
@@ -357,6 +486,7 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
   const sourceKind = kindForExtension(extension);
   const source = (input.source ?? {}) as Record<string, unknown>;
   const capture = normalizeCaptureMetadata(source.capture);
+  const metadata = normalizeSourceMetadata(source.metadata);
   return {
     ...input,
     schemaVersion: 3,
@@ -370,6 +500,7 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
           ? { capturedAt: input.original?.importedAt }
           : {}),
       acquiredBy: typeof source.acquiredBy === "string" ? source.acquiredBy : "legacy-v2",
+      ...(metadata ? { metadata } : {}),
       ...(capture ? { capture } : {})
     },
     parse: {
@@ -388,24 +519,43 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
 function normalizeCaptureMetadata(value: unknown): SourceManifest["source"]["capture"] | undefined {
   if (!value || typeof value !== "object") return undefined;
   const capture = value as Record<string, unknown>;
-  if (typeof capture.status !== "number" || typeof capture.contentType !== "string") return undefined;
-  return {
-    status: capture.status,
-    contentType: capture.contentType,
+  const output: NonNullable<SourceManifest["source"]["capture"]> = {
+    ...(typeof capture.status === "number" ? { status: capture.status } : {}),
+    ...(typeof capture.contentType === "string" ? { contentType: capture.contentType } : {}),
     ...(typeof capture.etag === "string" ? { etag: capture.etag } : {}),
-    ...(typeof capture.lastModified === "string" ? { lastModified: capture.lastModified } : {})
+    ...(typeof capture.lastModified === "string" ? { lastModified: capture.lastModified } : {}),
+    ...(capture.platform === "bilibili" || capture.platform === "douyin" ? { platform: capture.platform } : {}),
+    ...(typeof capture.videoId === "string" ? { videoId: capture.videoId } : {}),
+    ...(typeof capture.durationMs === "number" && Number.isFinite(capture.durationMs)
+      ? { durationMs: capture.durationMs }
+      : {})
   };
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function normalizeSourceMetadata(value: unknown): SourceManifest["source"]["metadata"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const output: Record<string, string | string[]> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item === "string") output[key] = item;
+    else if (Array.isArray(item) && item.every((entry) => typeof entry === "string")) {
+      output[key] = item.slice();
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
 }
 
 function kindForExtension(extension: string): SourceKind {
   if (extension === "md" || extension === "markdown") return "markdown";
   if (extension === "txt") return "text";
   if (extension === "pdf") return "pdf";
+  if (["mp3", "m4a", "wav", "ogg", "oga", "flac", "mpga", "mpeg"].includes(extension)) return "audio";
+  if (["mp4", "mov", "webm", "mkv", "avi", "bili-caption"].includes(extension)) return "video";
   return "unknown";
 }
 
 function isSourceKind(value: unknown): value is SourceKind {
-  return ["markdown", "text", "pdf", "web", "unknown"].includes(String(value));
+  return ["markdown", "text", "pdf", "web", "audio", "video", "unknown"].includes(String(value));
 }
 
 function assertSafeId(value: string, label: string): void {

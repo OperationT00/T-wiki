@@ -1,6 +1,8 @@
-import { Modal, Notice, Setting } from "obsidian";
+import { Modal, Notice, Setting, type App } from "obsidian";
 
 import { DEFAULT_CONFIG, sha256 } from "../core/wiki-core";
+import { isBilibiliUrl } from "../connectors/bilibili-video-connector";
+import { isDouyinUrl } from "../connectors/douyin-video-connector";
 import type {
   IngestCoverageReport,
   KnowledgeDecision,
@@ -10,6 +12,116 @@ import type {
   WikiConfig
 } from "../types";
 import type LLMWikiPlugin from "../main";
+
+export function confirmAction(
+  app: App,
+  title: string,
+  message: string,
+  confirmText = "确认",
+  destructive = false
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    new ConfirmationModal(app, title, message, confirmText, destructive, resolve).open();
+  });
+}
+
+export function requestText(
+  app: App,
+  title: string,
+  description: string,
+  initialValue = "",
+  multiline = false
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    new TextRequestModal(app, title, description, initialValue, multiline, resolve).open();
+  });
+}
+
+class ConfirmationModal extends Modal {
+  private settled = false;
+
+  constructor(
+    app: App,
+    private readonly titleText: string,
+    private readonly message: string,
+    private readonly confirmText: string,
+    private readonly destructive: boolean,
+    private readonly resolve: (confirmed: boolean) => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.setTitle(this.titleText);
+    this.contentEl.createEl("p", { text: this.message, cls: "llm-wiki-confirm-message" });
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("取消").onClick(() => this.finish(false)))
+      .addButton((button) => {
+        button.setButtonText(this.confirmText).setCta();
+        if (this.destructive) button.buttonEl.addClass("mod-warning");
+        button.onClick(() => this.finish(true));
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.settled) this.resolve(false);
+  }
+
+  private finish(value: boolean): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolve(value);
+    this.close();
+  }
+}
+
+class TextRequestModal extends Modal {
+  private settled = false;
+  private value: string;
+
+  constructor(
+    app: App,
+    private readonly titleText: string,
+    private readonly description: string,
+    initialValue: string,
+    private readonly multiline: boolean,
+    private readonly resolve: (value: string | undefined) => void
+  ) {
+    super(app);
+    this.value = initialValue;
+  }
+
+  onOpen(): void {
+    this.setTitle(this.titleText);
+    if (this.description) this.contentEl.createEl("p", { text: this.description });
+    const setting = new Setting(this.contentEl).setName("内容");
+    if (this.multiline) {
+      setting.addTextArea((input) => input
+        .setValue(this.value)
+        .onChange((value) => { this.value = value; }));
+    } else {
+      setting.addText((input) => input
+        .setValue(this.value)
+        .onChange((value) => { this.value = value; }));
+    }
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("取消").onClick(() => this.finish(undefined)))
+      .addButton((button) => button.setButtonText("确定").setCta().onClick(() => this.finish(this.value.trim())));
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.settled) this.resolve(undefined);
+  }
+
+  private finish(value: string | undefined): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolve(value);
+    this.close();
+  }
+}
 
 export class InitializeModal extends Modal {
   private config: WikiConfig = structuredClone(DEFAULT_CONFIG);
@@ -79,30 +191,73 @@ export class InitializeModal extends Modal {
 
 export class UrlCaptureModal extends Modal {
   private controller?: AbortController;
+  private pendingInlineConfirmation?: (confirmed: boolean) => void;
 
-  constructor(private readonly plugin: LLMWikiPlugin) {
+  constructor(
+    private readonly plugin: LLMWikiPlugin,
+    private readonly mode: "web" | "video" = "web"
+  ) {
     super(plugin.app);
   }
 
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "抓取网页" });
+    const videoMode = this.mode === "video";
+    contentEl.createEl("h2", { text: videoMode ? "解析在线视频" : "抓取网页正文" });
     contentEl.createEl("p", {
-      text: "公开网页会直接提取为 canonical Markdown；登录、动态或受保护页面请使用浏览器 Web Clipper。",
+      text: videoMode
+        ? "支持公开 Bilibili 和抖音视频。Bilibili 优先读取字幕；抖音通过本机 yt-dlp 下载后复用 ASR 与关键画面解析。不会自动 Ingest。"
+        : "提取公开网页的正文并生成 Markdown。登录、动态或受保护页面请使用浏览器 Web Clipper；视频链接请使用“解析在线视频”。",
       cls: "llm-wiki-muted"
     });
     let url = "";
-    const status = contentEl.createEl("p", { text: "等待输入网页地址", cls: "llm-wiki-muted" });
+    let bilibiliPages: "current" | "all" = "current";
+    let bilibiliLanguage = "";
+    const status = contentEl.createEl("p", {
+      text: videoMode ? "等待输入 Bilibili 或抖音视频地址" : "等待输入网页地址",
+      cls: "llm-wiki-muted"
+    });
     let directButton: import("obsidian").ButtonComponent | undefined;
     let browserButton: import("obsidian").ButtonComponent | undefined;
+    let transcribeButton: import("obsidian").ButtonComponent | undefined;
+    const bilibiliSettings: Setting[] = [];
+    const updateVideoPlatform = (): void => {
+      if (!videoMode) return;
+      const douyin = isDouyinUrl(url);
+      const bilibili = isBilibiliUrl(url);
+      directButton?.setButtonText(douyin ? "下载并图文解析" : "读取视频字幕");
+      for (const setting of bilibiliSettings) setting.settingEl.hidden = douyin;
+      if (transcribeButton) setButtonVisible(transcribeButton, false);
+      status.setText(douyin
+        ? "已识别抖音视频：将通过本机 yt-dlp 下载完整视频"
+        : bilibili ? "已识别 Bilibili 视频" : "等待输入 Bilibili 或抖音视频地址");
+    };
     new Setting(contentEl)
-      .setName("网页地址")
+      .setName(videoMode ? "视频地址" : "网页地址")
       .addText((text) => text
-        .setPlaceholder("https://example.com/article")
-        .onChange((value) => { url = value.trim(); }));
-    new Setting(contentEl)
-      .addButton((button) => {
+        .setPlaceholder(videoMode ? "https://www.bilibili.com/video/BV... 或 https://v.douyin.com/..." : "https://example.com/article")
+        .onChange((value) => {
+          url = value.trim();
+          updateVideoPlatform();
+        }));
+    if (videoMode) {
+      bilibiliSettings.push(new Setting(contentEl)
+        .setName("Bilibili 分 P")
+        .setDesc("URL 中的 p 参数决定“当前分 P”。")
+        .addDropdown((dropdown) => dropdown
+          .addOption("current", "当前分 P")
+          .addOption("all", "全部分 P（最多 100）")
+          .setValue(bilibiliPages)
+          .onChange((value) => { bilibiliPages = value === "all" ? "all" : "current"; })));
+      bilibiliSettings.push(new Setting(contentEl)
+        .setName("字幕语言偏好")
+        .setDesc("可选，例如 zh-CN；留空时按简体中文、中文、第一条字幕排序。")
+        .addText((text) => text.onChange((value) => { bilibiliLanguage = value.trim(); })));
+    }
+    const actions = new Setting(contentEl);
+    if (!videoMode) {
+      actions.addButton((button) => {
         browserButton = button;
         button.setButtonText("在浏览器中采集").onClick(async () => {
           try {
@@ -114,10 +269,23 @@ export class UrlCaptureModal extends Modal {
             status.setText(error instanceof Error ? error.message : String(error));
           }
         });
-      })
-      .addButton((button) => {
+      });
+    }
+    actions.addButton((button) => {
         directButton = button;
-        button.setCta().setButtonText("直接抓取").onClick(async () => {
+        button.setCta().setButtonText(videoMode ? "读取视频字幕" : "直接抓取正文").onClick(async () => {
+          if (videoMode && isDouyinUrl(url)) {
+            await this.captureDouyin(url, status, directButton, browserButton, transcribeButton);
+            return;
+          }
+          if (videoMode && !isBilibiliUrl(url)) {
+            status.setText("当前在线视频入口支持公开 Bilibili 和抖音 HTTPS 地址。");
+            return;
+          }
+          if (!videoMode && (isBilibiliUrl(url) || isDouyinUrl(url))) {
+            status.setText("这是视频平台地址，请关闭窗口并使用素材页的“解析在线视频”入口。");
+            return;
+          }
           directButton?.setDisabled(true);
           browserButton?.setDisabled(true);
           this.controller = new AbortController();
@@ -125,30 +293,236 @@ export class UrlCaptureModal extends Modal {
             const result = await this.plugin.captureUrl(
               url,
               this.controller.signal,
-              (phase) => status.setText(phase === "download"
-                ? "正在下载网页 HTML…"
-                : phase === "parse"
-                  ? "HTML 已保存，正在解析并发布 Markdown…"
-                  : "网页抓取完成")
+              (phase) => status.setText(videoMode
+                ? phase === "download"
+                  ? "正在读取视频元数据…"
+                  : phase === "parse" ? "正在获取并整理字幕…" : "在线视频解析完成"
+                : phase === "download"
+                  ? "正在下载网页 HTML…"
+                  : phase === "parse"
+                    ? "HTML 已保存，正在解析并发布 Markdown…"
+                    : "网页抓取完成"),
+              { pages: bilibiliPages, language: bilibiliLanguage || undefined },
+              videoMode ? "video" : "web"
             );
-            new Notice(result.duplicate ? "网页内容已存在，已复用原素材" : "网页已抓取并生成 raw Markdown");
+            new Notice(result.duplicate
+              ? "内容已存在，已复用原素材"
+              : videoMode ? "视频字幕已生成 raw Markdown" : "网页已抓取并生成 raw Markdown");
             this.plugin.settings.activeTab = "materials";
             await this.plugin.saveSettings();
             await this.plugin.refreshView();
             this.close();
           } catch (error) {
-            status.setText(`${error instanceof Error ? error.message : String(error)}。可改用“在浏览器中采集”。`);
+            const message = error instanceof Error ? error.message : String(error);
+            const noCaption = error && typeof error === "object" && (error as { code?: string }).code === "NO_CAPTION_TRACK";
+            status.setText(noCaption
+              ? `${message}。可以在明确确认后下载公开音轨并发送到已配置的转写服务。`
+              : videoMode ? message : `${message}。可改用“在浏览器中采集”。`);
+            if (noCaption && transcribeButton) setButtonVisible(transcribeButton, true);
             directButton?.setDisabled(false);
             browserButton?.setDisabled(false);
           }
         });
       });
+    if (videoMode) {
+      actions.addButton((button) => {
+        transcribeButton = button;
+        setButtonVisible(button, false);
+        button.setCta().setButtonText("确认并远程转写");
+        button.buttonEl.addClass("mod-warning");
+        button.onClick(async () => {
+          if (!isBilibiliUrl(url)) {
+            status.setText(isDouyinUrl(url)
+              ? "抖音视频请点击“下载并图文解析”；该按钮仅用于 Bilibili 无字幕时的音轨转写。"
+              : "请先输入有效的 Bilibili 或抖音视频地址，也可以直接粘贴抖音数字视频 ID。");
+            setButtonVisible(button, false);
+            return;
+          }
+          try {
+            const config = await this.plugin.wiki.loadConfig();
+            const provider = config.parsing.providers["media-transcription"];
+            if (!provider?.enabled) throw new Error("请先在设置中启用音视频远程转写");
+            const options = provider.options;
+            const confirmed = await confirmAction(this.plugin.app, "确认远程转写", [
+              `来源：${url}`,
+              `协议：${String(options.protocol ?? "openai-transcriptions")}`,
+              `服务：${String(options.baseUrl ?? "")}`,
+              `模型：${String(options.model ?? "")}`,
+              "",
+              "将先下载该分 P 的公开音轨，再把音轨发送给上述远程服务。是否仅授权本次操作？"
+            ].join("\n"), "确认并转写", true);
+            if (!confirmed) return;
+            directButton?.setDisabled(true);
+            browserButton?.setDisabled(true);
+            transcribeButton?.setDisabled(true);
+            this.controller = new AbortController();
+            await this.plugin.captureBilibiliWithTranscription(
+              url,
+              this.controller.signal,
+              (completed, total) => status.setText(total
+                ? `正在下载公开音轨：${Math.round(completed / total * 100)}%`
+                : `正在下载公开音轨：${Math.round(completed / 1024 / 1024)} MiB`)
+            );
+            new Notice("Bilibili 音轨已转写并生成 raw Markdown");
+            this.plugin.settings.activeTab = "materials";
+            await this.plugin.saveSettings();
+            await this.plugin.refreshView();
+            this.close();
+          } catch (error) {
+            status.setText(error instanceof Error ? error.message : String(error));
+            directButton?.setDisabled(false);
+            browserButton?.setDisabled(false);
+            transcribeButton?.setDisabled(false);
+          }
+        });
+      });
+    }
+    updateVideoPlatform();
+  }
+
+  private async captureDouyin(
+    url: string,
+    status: HTMLParagraphElement,
+    directButton?: import("obsidian").ButtonComponent,
+    browserButton?: import("obsidian").ButtonComponent,
+    transcribeButton?: import("obsidian").ButtonComponent
+  ): Promise<void> {
+    try {
+      const douyin = this.plugin.settings.onlineVideo.douyin;
+      if (!douyin.enabled) throw new Error("请先在 T-Wiki 设置中启用“在线视频 / 抖音”并测试 yt-dlp");
+      const config = await this.plugin.wiki.loadConfig();
+      const provider = config.parsing.providers["media-transcription"];
+      if (!provider?.enabled) throw new Error("请先在设置中启用音视频远程转写");
+      const options = provider.options;
+      const visual = options.visual && typeof options.visual === "object"
+        ? options.visual as Record<string, unknown>
+        : {};
+      const vision = visual.vision && typeof visual.vision === "object"
+        ? visual.vision as Record<string, unknown>
+        : {};
+      directButton?.setDisabled(true);
+      browserButton?.setDisabled(true);
+      transcribeButton?.setDisabled(true);
+      const confirmed = await this.confirmInline("确认解析抖音视频", [
+        `来源：${url}`,
+        `yt-dlp：${douyin.ytDlpPath || "自动检测"}`,
+        `最大下载：${Math.round(douyin.maxDownloadBytes / 1024 / 1024)} MiB`,
+        "",
+        `ASR 服务：${String(options.baseUrl ?? "")}`,
+        `ASR 模型：${String(options.model ?? "")}`,
+        ...(visual.enabled === true ? [
+          `视觉服务：${String(vision.baseUrl ?? "")}`,
+          `视觉模型：${String(vision.model ?? "")}`
+        ] : ["关键画面：未启用，将生成纯文字稿"]),
+        "",
+        "将下载完整公开视频并发送给 ASR；启用关键画面时还会发送缩略图及相邻文字。默认不会读取浏览器 Cookie。是否仅授权本次操作？"
+      ].join("\n"), "确认并解析", true);
+      if (!confirmed) {
+        status.setText("已取消本次抖音解析，未下载或上传视频");
+        directButton?.setDisabled(false);
+        browserButton?.setDisabled(false);
+        transcribeButton?.setDisabled(false);
+        return;
+      }
+      status.setText("授权完成，正在启动抖音解析；关闭此窗口将取消任务…");
+      new Notice("抖音视频解析已启动，进度将在当前窗口持续显示");
+      this.controller = new AbortController();
+      const report = (phase: import("../connectors/douyin-video-connector").DouyinCapturePhase, progress?: import("../connectors/yt-dlp").YtDlpDownloadProgress): void => {
+        const messages = {
+          resolving: "正在解析抖音分享链接…",
+          metadata: "视频信息已确认，准备下载…",
+          storing: "正在校验并保存视频原件…",
+          uploading: "正在上传音视频到转写服务…",
+          transcribing: "正在进行语音转写…",
+          "reading-media-info": "正在读取视频媒体信息…",
+          "extracting-frames": "正在提取关键帧候选…",
+          "filtering-frames": "正在本地筛选关键帧…",
+          "visual-analysis": "正在使用视觉模型判断关键画面…",
+          "building-markdown": "正在合成图文 Markdown…",
+          "quality-check": "正在执行解析质量校验…",
+          publishing: "正在发布 canonical raw Markdown…",
+          verifying: "正在验证 Markdown 与图片完整性…",
+          complete: "抖音视频图文解析完成"
+        } as const;
+        if (phase === "downloading") {
+          status.setText(progress?.percent !== undefined
+            ? `正在下载抖音视频：${Math.round(progress.percent)}%`
+            : `正在下载抖音视频：${Math.round((progress?.downloadedBytes ?? 0) / 1024 / 1024)} MiB`);
+        } else status.setText(messages[phase]);
+      };
+      let result;
+      try {
+        result = await this.plugin.captureDouyinWithTranscription(url, false, this.controller.signal, report);
+      } catch (error) {
+        const cookieRequired = error && typeof error === "object"
+          && (error as { code?: string }).code === "DOUYIN_COOKIE_REQUIRED";
+        if (!cookieRequired) throw error;
+        const allowCookies = await this.confirmInline("浏览器 Cookie 一次性授权", [
+          "抖音要求有效的浏览器登录状态。",
+          `浏览器：${browserLabel(douyin.cookieBrowser)}`,
+          "",
+          "T-Wiki 不会读取、复制或保存 Cookie；只会让 yt-dlp 在本次重试中临时读取浏览器 Cookie。是否授权一次？"
+        ].join("\n"), "授权本次重试", true);
+        if (!allowCookies) throw new Error("已取消浏览器 Cookie 授权，未继续下载");
+        status.setText("已获得本次 Cookie 授权，正在重新解析抖音视频…");
+        result = await this.plugin.captureDouyinWithTranscription(url, true, this.controller.signal, report);
+      }
+      new Notice(result.duplicate ? "视频原件已存在，已重新生成文字稿" : "抖音视频已生成 raw Markdown");
+      this.plugin.settings.activeTab = "materials";
+      await this.plugin.saveSettings();
+      await this.plugin.refreshView();
+      this.close();
+    } catch (error) {
+      status.setText(error instanceof Error ? error.message : String(error));
+      directButton?.setDisabled(false);
+      browserButton?.setDisabled(false);
+      transcribeButton?.setDisabled(false);
+    }
+  }
+
+  private confirmInline(
+    title: string,
+    message: string,
+    confirmText: string,
+    destructive = false
+  ): Promise<boolean> {
+    this.pendingInlineConfirmation?.(false);
+    return new Promise((resolve) => {
+      const card = this.contentEl.createDiv({ cls: "llm-wiki-card" });
+      card.createEl("h3", { text: title });
+      card.createEl("p", { text: message, cls: "llm-wiki-confirm-message" });
+      let settled = false;
+      const finish = (confirmed: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (this.pendingInlineConfirmation === finish) this.pendingInlineConfirmation = undefined;
+        card.remove();
+        resolve(confirmed);
+      };
+      this.pendingInlineConfirmation = finish;
+      new Setting(card)
+        .addButton((button) => button.setButtonText("取消").onClick(() => finish(false)))
+        .addButton((button) => {
+          button.setButtonText(confirmText).setCta();
+          if (destructive) button.buttonEl.addClass("mod-warning");
+          button.onClick(() => finish(true));
+        });
+      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
   }
 
   onClose(): void {
+    this.pendingInlineConfirmation?.(false);
+    this.pendingInlineConfirmation = undefined;
     this.controller?.abort();
     this.contentEl.empty();
   }
+}
+
+function browserLabel(value: "edge" | "chrome" | "firefox"): string {
+  if (value === "chrome") return "Google Chrome";
+  if (value === "firefox") return "Mozilla Firefox";
+  return "Microsoft Edge";
 }
 
 export class ReviewModal extends Modal {
@@ -333,7 +707,9 @@ export class DeleteSourceModal extends Modal {
       .addButton((button) => button.setButtonText("取消").onClick(() => this.close()))
       .addButton((button) => {
         deleteButton = button;
-        button.setWarning().setButtonText("永久删除").setDisabled(true).onClick(async () => {
+        button.setCta().setButtonText("永久删除").setDisabled(true);
+        button.buttonEl.addClass("mod-warning");
+        button.onClick(async () => {
           button.setDisabled(true);
           try {
             const result = await this.plugin.workflows.deleteSource(this.preview.sourceId);
@@ -380,9 +756,9 @@ function renderIngestCoverage(container: HTMLElement, report: IngestCoverageRepo
 function renderKnowledgeDecision(container: HTMLElement, decision: KnowledgeDecision): void {
   const card = container.createDiv({ cls: "llm-wiki-card" });
   card.createEl("strong", { text: `${decisionLabel(decision.decision)} · ${decision.title}` });
-  if (decision.targetPath) card.createEl("div", { text: decision.targetPath, cls: "llm-wiki-muted" });
+  if (decision.targetPath) card.createDiv({ text: decision.targetPath, cls: "llm-wiki-muted" });
   card.createEl("p", { text: decision.reason });
-  card.createEl("div", {
+  card.createDiv({
     text: `Evidence: ${decision.evidence.map(formatCoverageEvidence).join(", ")}`,
     cls: "llm-wiki-muted"
   });
@@ -407,6 +783,11 @@ function decisionLabel(decision: KnowledgeDecision["decision"]): string {
 
 function shortId(value: string): string {
   return value.length > 12 ? `${value.slice(0, 8)}…` : value;
+}
+
+function setButtonVisible(button: import("obsidian").ButtonComponent, visible: boolean): void {
+  button.buttonEl.hidden = !visible;
+  button.buttonEl.style.display = visible ? "" : "none";
 }
 
 export function summarizePlan(plan: WikiChangePlan): string {

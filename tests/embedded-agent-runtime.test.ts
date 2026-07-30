@@ -298,7 +298,7 @@ test("legacy Claude settings migrate to Anthropic API without secret material", 
       { id: "deep", label: "Deep", contextWindow: 40_000, role: "deep" }
     ]
   } as any);
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.equal(migrated.agent.protocol, "anthropic-messages");
   assert.equal(migrated.agent.baseUrl, "https://api.deepseek.com/anthropic");
   assert.equal(migrated.agent.secretId, "legacy-secret-id");

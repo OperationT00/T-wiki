@@ -2,11 +2,13 @@ import {
   ItemView,
   MarkdownRenderer,
   Notice,
+  TFile,
   setIcon,
   type WorkspaceLeaf
 } from "obsidian";
 
 import type LLMWikiPlugin from "../main";
+import { normalizeSocialVideoTitle } from "../core/source-title";
 import type {
   AgentEvent,
   ChatSession,
@@ -22,6 +24,8 @@ import {
   ReviewModal,
   RollbackModal,
   UrlCaptureModal,
+  confirmAction,
+  requestText,
   summarizePlan
 } from "./modals";
 import { sourcePipelineSteps } from "./pipeline-model";
@@ -214,7 +218,7 @@ export class WorkbenchView extends ItemView {
       setIcon(marker, "check");
       const copy = item.createDiv();
       copy.createEl("strong", { text: title });
-      copy.createEl("span", { text: description });
+      copy.createSpan({ text: description });
     }
 
     const actions = onboarding.createDiv({ cls: "llm-wiki-onboarding-actions" });
@@ -252,18 +256,24 @@ export class WorkbenchView extends ItemView {
       });
       return;
     }
-    const toolbar = panel.createDiv({ cls: "llm-wiki-card llm-wiki-actions" });
-    const input = document.createElement("input");
+    const toolbar = panel.createDiv({ cls: "llm-wiki-card llm-wiki-material-toolbar" });
+    const importActions = toolbar.createDiv({
+      cls: "llm-wiki-material-action-group llm-wiki-material-action-group-primary"
+    });
+    const maintenanceActions = toolbar.createDiv({
+      cls: "llm-wiki-material-action-group llm-wiki-material-action-group-secondary"
+    });
+    const input = toolbar.createEl("input");
     input.type = "file";
     input.multiple = true;
     // ParserRegistry decides support. Keeping this unrestricted lets a newly
     // registered provider become usable without changing the UI.
     input.accept = "";
     input.hidden = true;
-    toolbar.appendChild(input);
-    action(toolbar, "选择文件", async () => input.click());
-    action(toolbar, "抓取网页", async () => new UrlCaptureModal(this.plugin).open());
-    action(toolbar, "扫描 Clipper Inbox", async () => {
+    action(importActions, "选择文件", async () => input.click());
+    action(importActions, "抓取网页正文", async () => new UrlCaptureModal(this.plugin, "web").open());
+    action(importActions, "解析在线视频", async () => new UrlCaptureModal(this.plugin, "video").open());
+    action(maintenanceActions, "扫描 Clipper Inbox", async () => {
       try {
         const result = await this.plugin.scanWebClipper();
         new Notice(`Clipper 扫描：新增 ${result.imported}，重复 ${result.duplicates}，失败 ${result.failed.length}`);
@@ -272,7 +282,7 @@ export class WorkbenchView extends ItemView {
         new Notice(error instanceof Error ? error.message : String(error));
       }
     });
-    action(toolbar, "校验 raw/", async () => {
+    action(maintenanceActions, "校验 raw/", async () => {
       const report = await this.plugin.wiki.verifyRaw();
       const failures = report.filter((item) => !item.ok).length;
       new Notice(failures > 0 ? `${failures} 个 raw 产物异常` : "raw 产物校验通过");
@@ -306,16 +316,22 @@ export class WorkbenchView extends ItemView {
     };
 
     const sources = await this.plugin.wiki.listSources();
-    const mineruEnabled = (await this.plugin.wiki.loadConfig())
-      .parsing.providers["mineru-http"]?.enabled === true;
+    const parsingConfig = (await this.plugin.wiki.loadConfig()).parsing;
+    const mineruEnabled = parsingConfig.providers["mineru-http"]?.enabled === true;
+    const mediaProvider = parsingConfig.providers["media-transcription"];
     if (sources.length === 0) {
-      panel.createEl("p", { text: "拖拽 MD、TXT 或 PDF 到这里开始。", cls: "llm-wiki-muted" });
+      panel.createEl("p", { text: "拖拽 MD、TXT、PDF、音频或视频到这里开始。", cls: "llm-wiki-muted" });
       return;
     }
-    for (const source of sources) this.renderSource(panel, source, mineruEnabled);
+    for (const source of sources) this.renderSource(panel, source, mineruEnabled, mediaProvider);
   }
 
-  private renderSource(panel: HTMLElement, source: SourceManifest, mineruEnabled: boolean): void {
+  private renderSource(
+    panel: HTMLElement,
+    source: SourceManifest,
+    mineruEnabled: boolean,
+    mediaProvider?: import("../types").ParserProviderConfig
+  ): void {
     const card = panel.createDiv({
       cls: "llm-wiki-card llm-wiki-source-card",
       attr: { tabindex: "0" }
@@ -324,8 +340,18 @@ export class WorkbenchView extends ItemView {
     const parserId = revision?.parserId ?? [...source.parse.attempts]
       .reverse()
       .find((attempt) => attempt.parserId)?.parserId;
+    const storedTitle = typeof revision?.metadata.title === "string"
+      ? revision.metadata.title
+      : typeof source.source.metadata?.title === "string" ? source.source.metadata.title : source.original.name;
+    const displayTitle = source.source.acquiredBy === "douyin-video"
+      || source.source.metadata?.source_platform === "douyin"
+      ? normalizeSocialVideoTitle(
+        storedTitle,
+        `douyin-${String(source.source.metadata?.douyin_video_id ?? source.sourceId)}`
+      )
+      : storedTitle;
     const heading = card.createDiv({ cls: "llm-wiki-source-heading" });
-    heading.createEl("h3", { text: source.original.name });
+    heading.createEl("h3", { text: displayTitle });
     if (parserId) {
       heading.createSpan({
         text: parserDisplayName(parserId),
@@ -336,6 +362,24 @@ export class WorkbenchView extends ItemView {
       card.createEl("p", { text: "来源：Obsidian Web Clipper", cls: "llm-wiki-muted" });
     } else if (source.source.acquiredBy === "url-capture") {
       card.createEl("p", { text: "来源：网页直接抓取", cls: "llm-wiki-muted" });
+    } else if (source.source.acquiredBy === "bilibili-video") {
+      card.createEl("p", { text: "来源：Bilibili 公开字幕", cls: "llm-wiki-muted" });
+    } else if (source.source.acquiredBy === "douyin-video" || source.source.metadata?.source_platform === "douyin") {
+      const author = typeof source.source.metadata?.author === "string" ? ` · ${source.source.metadata.author}` : "";
+      const duration = formatMediaDuration(Number(source.source.metadata?.duration_ms));
+      card.createEl("p", {
+        text: `来源：抖音公开视频${author}${duration ? ` · ${duration}` : ""}`,
+        cls: "llm-wiki-muted"
+      });
+    } else if (source.source.kind === "audio" || source.source.kind === "video") {
+      card.createEl("p", { text: `来源：本地${source.source.kind === "audio" ? "音频" : "视频"}`, cls: "llm-wiki-muted" });
+    }
+    if (source.source.kind === "video" && revision) {
+      const frameCount = Number(revision.metadata.visual_frame_count ?? 0);
+      card.createEl("p", {
+        text: frameCount > 0 ? `图文文字稿 · ${frameCount} 张关键画面` : "纯文字稿",
+        cls: "llm-wiki-muted"
+      });
     }
     if (source.source.uri) {
       const openSource = card.createEl("button", { text: "打开来源网页" });
@@ -371,6 +415,11 @@ export class WorkbenchView extends ItemView {
         source.sourceId,
         liveProgress ?? activeAttempt?.progress
       );
+      const cancelParse = card.createEl("button", { text: "取消解析" });
+      cancelParse.onclick = async () => {
+        cancelParse.disabled = true;
+        await this.plugin.wiki.cancelParse(source.sourceId);
+      };
     } else {
       this.progressSnapshots.delete(source.sourceId);
     }
@@ -379,7 +428,7 @@ export class WorkbenchView extends ItemView {
     }
     if (revision) {
       const openRaw = card.createEl("button", { text: "预览 Markdown" });
-      openRaw.onclick = () => void this.plugin.app.workspace.openLinkText(revision.rawPath, "", false);
+      openRaw.onclick = () => void this.openVaultFileExact(revision.rawPath);
       const quality = card.createEl("button", { text: "质量报告" });
       quality.onclick = () => new Notice(
         `${revision.quality.overall} · ${revision.quality.characterCount} 字符`
@@ -394,7 +443,7 @@ export class WorkbenchView extends ItemView {
     }
     if (sourcePage) {
       const open = card.createEl("button", { text: "打开 Source" });
-      open.onclick = () => void this.plugin.app.workspace.openLinkText(sourcePage, "", false);
+      open.onclick = () => void this.openVaultFileExact(sourcePage);
     }
     const rollbackAttempt = [...source.ingest.attempts].reverse()
       .find((attempt) => attempt.status === "ingested" && attempt.operationId);
@@ -452,6 +501,72 @@ export class WorkbenchView extends ItemView {
         await this.render();
       };
     }
+    if (mediaProvider?.enabled
+      && (source.source.kind === "audio" || source.source.kind === "video")
+      && parserId !== "bilibili-caption"
+      && (source.parse.status === "queued" || source.parse.status === "parse_failed" || source.parse.status === "parsed")) {
+      const transcribe = card.createEl("button", {
+        text: source.parse.status === "parse_failed"
+          ? "重试远程转写"
+          : source.parse.status === "parsed" ? "重新生成文字稿" : "开始远程转写",
+        cls: "mod-cta"
+      });
+      transcribe.onclick = async () => {
+        const options = mediaProvider.options;
+        const visual = options.visual && typeof options.visual === "object"
+          ? options.visual as Record<string, unknown>
+          : {};
+        const vision = visual.vision && typeof visual.vision === "object"
+          ? visual.vision as Record<string, unknown>
+          : {};
+        const visualLines = source.source.kind === "video" && visual.enabled === true
+          ? [
+            "",
+            "关键画面已启用：",
+            `本地 FFmpeg：${String(visual.ffmpegPath || "PATH 自动查找")}`,
+            `视觉服务：${String(vision.baseUrl ?? "")}`,
+            `视觉模型：${String(vision.model ?? "")}`,
+            "将上传候选帧的 512px 缩略图与前后 30 秒文字，不上传完整视频。"
+          ]
+          : [];
+        const titleModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
+          ?? this.plugin.settings.agent.models[0];
+        const summary = [
+          `来源：${source.original.name}`,
+          `大小：${formatBytes(source.original.size)}`,
+          `协议：${String(options.protocol ?? "openai-transcriptions")}`,
+          `服务：${String(options.baseUrl ?? "")}`,
+          `模型：${String(options.model ?? "")}`,
+          `标题生成：${titleModel?.id ?? "未配置 fast 模型"}`,
+          "标题生成会把最多约 8,000 字的代表性文字稿发送给 Agent API。",
+          ...visualLines,
+          "",
+          ...(source.parse.status === "parsed"
+            ? ["这会创建新的 Parse Revision，旧 revision 仍保留在 Manifest 历史中。", ""]
+            : []),
+          "是否仅授权本次 ASR 转写及上方列出的视觉分析？"
+        ].join("\n");
+        if (!await confirmAction(this.app, "确认远程解析", summary, "确认并解析", true)) return;
+        transcribe.disabled = true;
+        try {
+          this.plugin.mediaUploadConsent.approve(source.sourceId);
+          await this.plugin.wiki.reparseSourceWith(source.sourceId, "media-transcription");
+        } catch (error) {
+          new Notice(error instanceof Error ? error.message : String(error));
+        } finally {
+          await this.render();
+        }
+      };
+    }
+    if (mediaProvider?.enabled !== true
+      && (source.source.kind === "audio" || source.source.kind === "video")
+      && parserId !== "bilibili-caption"
+      && source.parse.status === "queued") {
+      card.createDiv({
+        text: "等待转写：请在 T-Wiki 设置的“音视频解析”中开启“启用远程转写”并保存。",
+        cls: "llm-wiki-warning"
+      });
+    }
     if (source.parse.status === "parsed"
       && (source.ingest.status === "not_started" || source.ingest.status === "ingest_failed")) {
       const ingest = card.createEl("button", {
@@ -504,6 +619,15 @@ export class WorkbenchView extends ItemView {
         }
       };
     }
+  }
+
+  private async openVaultFileExact(path: string): Promise<void> {
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      new Notice(`文件不存在：${path}`);
+      return;
+    }
+    await this.plugin.app.workspace.getLeaf(false).openFile(file);
   }
 
   private renderSourcePipeline(
@@ -795,9 +919,14 @@ export class WorkbenchView extends ItemView {
           }
           monitor.accept(event);
         };
-        const requestDirection = async (discoveries: string, questions: string[]) => window.prompt(
-            `${discoveries}\n\n${questions.map((question, index) => `${index + 1}. ${question}`).join("\n")}\n\n请输入处理方向：`
-          )?.trim() || "按当前发现继续，保留不确定性并在变更说明中标注。";
+        const requestDirection = async (discoveries: string, questions: string[]) =>
+          await requestText(
+            this.app,
+            "需要你的处理方向",
+            `${discoveries}\n\n${questions.map((question, index) => `${index + 1}. ${question}`).join("\n")}`,
+            "",
+            true
+          ) || "按当前发现继续，保留不确定性并在变更说明中标注。";
         if (content.startsWith("/")) {
           const result = await this.plugin.workflows.executeCommandText(content, sink, history, requestDirection);
           output = result.text;
@@ -848,7 +977,7 @@ export class WorkbenchView extends ItemView {
     const toolbar = workspace.createDiv({ cls: "llm-wiki-card llm-wiki-smart-toolbar" });
     const heading = toolbar.createDiv({ cls: "llm-wiki-smart-heading" });
     heading.createEl("strong", { text: "智能工作区" });
-    heading.createEl("span", {
+    heading.createSpan({
       text: mode === "query"
         ? "从 Index 进入 Wiki，并沿知识链接查找答案"
         : "自由对话或执行 /save、/lint 等 Agent 指令",
@@ -1004,7 +1133,7 @@ export class WorkbenchView extends ItemView {
 
   private async renameCurrentSession(): Promise<void> {
     const current = this.plugin.activeSession();
-    const title = window.prompt("重命名对话", current.title)?.trim();
+    const title = await requestText(this.app, "重命名对话", "输入新的对话名称。", current.title);
     if (!title || title === current.title) return;
     this.plugin.renameSession(title, current.id);
     await this.plugin.saveSettings();
@@ -1013,7 +1142,13 @@ export class WorkbenchView extends ItemView {
 
   private async clearCurrentSession(): Promise<void> {
     const current = this.plugin.activeSession();
-    if (current.messages.length > 0 && !window.confirm(`清空对话“${current.title}”？该操作无法撤销。`)) return;
+    if (current.messages.length > 0 && !await confirmAction(
+      this.app,
+      "清空对话",
+      `清空对话“${current.title}”？该操作无法撤销。`,
+      "清空",
+      true
+    )) return;
     this.plugin.clearSession(current.id);
     await this.plugin.saveSettings();
     await this.render();
@@ -1021,7 +1156,13 @@ export class WorkbenchView extends ItemView {
 
   private async deleteCurrentSession(): Promise<void> {
     const current = this.plugin.activeSession();
-    if (!window.confirm(`删除对话“${current.title}”？该操作无法撤销。`)) return;
+    if (!await confirmAction(
+      this.app,
+      "删除对话",
+      `删除对话“${current.title}”？该操作无法撤销。`,
+      "删除",
+      true
+    )) return;
     this.plugin.deleteSession(current.id);
     await this.plugin.saveSettings();
     await this.render();
@@ -1227,6 +1368,17 @@ export class WorkbenchView extends ItemView {
   }
 }
 
+function formatMediaDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return "";
+  const totalSeconds = Math.round(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 interface RunMonitor {
   accept(event: AgentEvent): void;
   complete(): void;
@@ -1383,6 +1535,7 @@ function formatProgressDetail(progress: ParseProgress): string {
       return `已处理 ${formatBytes(progress.completed)} / ${formatBytes(progress.total)}`;
     }
     if (progress.unit === "document") return "正在处理文档";
+    if (progress.unit === "second") return `已处理 ${progress.completed} / ${progress.total} 秒`;
     return `已完成 ${progress.completed} / ${progress.total}`;
   }
   return progress.precision === "stage" ? "阶段进度 · 服务暂未返回页级进度" : "正在计算进度";
@@ -1401,6 +1554,8 @@ function parserDisplayName(parserId: string): string {
     case "markdown-pass-through": return "Markdown";
     case "plain-text": return "TXT";
     case "webpage-defuddle": return "网页";
+    case "bilibili-caption": return "Bilibili 字幕";
+    case "media-transcription": return "音视频转写";
     default: return "扩展解析器";
   }
 }

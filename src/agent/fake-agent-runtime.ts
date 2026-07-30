@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setAppTimeout } from "../utils/timers";
 
 import type {
   AgentConfig,
@@ -32,7 +33,7 @@ export class FakeAgentRuntime implements AgentRuntime {
     if (!this.initialized) throw new Error("Fake runtime 尚未初始化");
     for (const chunk of this.chunks) {
       if (this.cancelled) return;
-      if (this.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+      if (this.delayMs > 0) await new Promise<void>((resolve) => setAppTimeout(resolve, this.delayMs));
       yield chunk;
     }
   }

@@ -65,7 +65,7 @@ export class ToolResultCache {
 
   private evict(): void {
     while (this.entries.size > this.maxEntries || this.totalTokens > this.maxTokens) {
-      const oldest = this.entries.entries().next().value as [string, CacheEntry] | undefined;
+      const oldest = this.entries.entries().next().value;
       if (!oldest) break;
       this.entries.delete(oldest[0]);
       this.totalTokens -= oldest[1].tokens;

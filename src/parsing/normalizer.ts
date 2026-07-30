@@ -1,7 +1,6 @@
 import type { ParseIssue, ParsePayload, ParseQuality } from "../types";
+import { stripUnsafeControlCharacters } from "../utils/text-safety";
 import { ParserError } from "./parser-types";
-
-const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 export function decodeText(bytes: Uint8Array, allowUtf16 = true): string {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(3));
@@ -25,11 +24,10 @@ export function decodeText(bytes: Uint8Array, allowUtf16 = true): string {
 }
 
 export function normalizeMarkdownBody(input: string): string {
-  const normalized = input
+  const normalized = stripUnsafeControlCharacters(input
     .replace(/^\uFEFF/, "")
     .replace(/\r\n?/g, "\n")
-    .normalize("NFC")
-    .replace(CONTROL_CHARACTERS, "");
+    .normalize("NFC"));
   const output: string[] = [];
   let inFence = false;
   let blankCount = 0;

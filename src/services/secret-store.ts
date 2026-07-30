@@ -1,5 +1,10 @@
 import type { App } from "obsidian";
 
+interface SecretStorageLike {
+  getSecret(id: string): string | null | undefined | Promise<string | null | undefined>;
+  setSecret(id: string, value: string): void | Promise<void>;
+}
+
 export class SecretStore {
   private volatile = new Map<string, string>();
   private writes = new Map<string, Promise<void>>();
@@ -9,16 +14,16 @@ export class SecretStore {
   async get(id: string): Promise<string> {
     if (!id) return "";
     await this.writes.get(id);
-    const storage = (this.app as any).secretStorage;
-    if (storage?.getSecret) return String(await storage.getSecret(id) ?? "");
+    const storage = this.secretStorage();
+    if (storage) return String(await storage.getSecret(id) ?? "");
     return this.volatile.get(id) ?? "";
   }
 
   async set(id: string, value: string): Promise<void> {
     const previous = this.writes.get(id) ?? Promise.resolve();
     const write = previous.catch(() => undefined).then(async () => {
-      const storage = (this.app as any).secretStorage;
-      if (storage?.setSecret) {
+      const storage = this.secretStorage();
+      if (storage) {
         await storage.setSecret(id, value);
         return;
       }
@@ -33,6 +38,10 @@ export class SecretStore {
   }
 
   isPersistent(): boolean {
-    return Boolean((this.app as any).secretStorage?.setSecret);
+    return this.secretStorage() !== undefined;
+  }
+
+  private secretStorage(): SecretStorageLike | undefined {
+    return (this.app as App & { secretStorage?: SecretStorageLike }).secretStorage;
   }
 }

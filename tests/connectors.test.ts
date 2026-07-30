@@ -38,12 +38,13 @@ test("Web Clipper connector scans a dedicated inbox and deduplicates through Int
 
 test("Web Clipper connector rejects system and parent directories", () => {
   for (const path of ["raw", "raw/clips", "wiki", ".llm-wiki/inbox", ".obsidian", "."]) {
-    assert.throws(() => validateInboxPath(path));
+    assert.throws(() => validateInboxPath(path, ".obsidian"));
   }
-  assert.equal(validateInboxPath("Clippings/Web"), "Clippings/Web");
+  assert.equal(validateInboxPath("Clippings/Web", ".obsidian"), "Clippings/Web");
 });
 
 class FakeVault {
+  readonly configDir = ".obsidian";
   private readonly file: any;
 
   constructor(path: string, private readonly bytes: Uint8Array) {
@@ -61,12 +62,10 @@ class FakeVault {
 
   offref(): void {}
 
-  getMarkdownFiles(): any[] {
-    return [this.file];
-  }
-
   getAbstractFileByPath(path: string): any {
-    return path === this.file.path ? this.file : null;
+    if (path === this.file.path) return this.file;
+    if (path === "Clippings") return { path, children: [this.file] };
+    return null;
   }
 
   async readBinary(): Promise<ArrayBuffer> {

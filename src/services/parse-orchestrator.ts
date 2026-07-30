@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { sha256 } from "../core/wiki-core";
+import { clearAppTimeout, setAppTimeout, type AppTimer } from "../utils/timers";
 import { ArtifactBuilder } from "../parsing/artifact-builder";
 import { KeyedLock } from "../parsing/keyed-lock";
 import {
@@ -12,6 +13,7 @@ import {
   OcrRequiredError,
   ParserError,
   ParserSelectionError,
+  sourceBodyFromBytes,
   type ParseContext,
   type ParseInput,
   type ParserSelection
@@ -35,6 +37,7 @@ import type {
 } from "../types";
 
 export class ParseOrchestrator {
+  private readonly activeControllers = new Map<string, AbortController>();
   constructor(
     private readonly objects: ObjectStorePort,
     private readonly manifests: ManifestRepositoryPort,
@@ -83,6 +86,18 @@ export class ParseOrchestrator {
     for (const sourceId of resumable) await this.parseSource(sourceId, { resume: true });
   }
 
+  cancel(sourceId: string): boolean {
+    const controller = this.activeControllers.get(sourceId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  }
+
+  dispose(): void {
+    for (const controller of this.activeControllers.values()) controller.abort();
+    this.activeControllers.clear();
+  }
+
   async parseSource(
     sourceId: string,
     options: {
@@ -94,7 +109,10 @@ export class ParseOrchestrator {
   ): Promise<SourceManifest> {
     return this.lock.run(sourceId, async () => {
       const manifest = await this.manifests.read(sourceId);
-      const bytes = await this.objects.read(manifest);
+      await this.objects.verify?.(manifest);
+      const source = this.objects.body
+        ? await this.objects.body(manifest)
+        : sourceBodyFromBytes(await this.objects.read(manifest));
       const input: ParseInput = {
         sourceId,
         sourceHash: manifest.sourceHash,
@@ -102,8 +120,10 @@ export class ParseOrchestrator {
         name: manifest.original.name,
         extension: manifest.original.extension,
         mime: manifest.original.mime,
-        bytes,
+        size: manifest.original.size,
+        source,
         sourceUri: manifest.source.uri,
+        sourceMetadata: manifest.source.metadata,
         captureContentType: manifest.source.capture?.contentType
       };
       let candidates: ParserSelection[];
@@ -162,11 +182,24 @@ export class ParseOrchestrator {
     }
     const providerConfig = this.config.parsing.providers[parser.descriptor.id]
       ?? { enabled: true, priority: 0, options: {} };
+    let runtimeFingerprint: unknown;
+    try {
+      runtimeFingerprint = parser.runtimeFingerprint
+        ? await parser.runtimeFingerprint(
+          input,
+          Object.freeze({ ...providerConfig.options }),
+          options.signal ?? new AbortController().signal
+        )
+        : undefined;
+    } catch (error) {
+      return this.commitSelectionFailure(sourceId, manifest, error);
+    }
     const parseKey = sha256(canonicalJson({
       sourceHash: manifest.sourceHash,
       parserId: parser.descriptor.id,
       parserVersion: parser.descriptor.version,
-      options: providerConfig.options
+      options: providerConfig.options,
+      runtimeFingerprint
     }));
     const existing = manifest.parse.revisions.find((revision) => revision.parseKey === parseKey);
     if (!options.force && !options.resume && existing) {
@@ -213,13 +246,14 @@ export class ParseOrchestrator {
     });
 
     const controller = new AbortController();
+    this.activeControllers.set(sourceId, controller);
     let timedOut = false;
     const abort = (): void => controller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
     const providerTimeout = parser.descriptor.execution === "remote"
       ? numericProviderOption(providerConfig.options.taskTimeoutMs, this.config.parsing.timeoutMs)
       : this.config.parsing.timeoutMs;
-    const timeout = setTimeout(() => {
+    const timeout = setAppTimeout(() => {
       timedOut = true;
       controller.abort();
     }, providerTimeout);
@@ -244,10 +278,10 @@ export class ParseOrchestrator {
     };
     let latestProgress: ParseProgressEvent | undefined;
     let pendingProgress: ParseProgress | undefined;
-    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let progressTimer: AppTimer | undefined;
     const flushProgress = (): Promise<void> => {
       if (progressTimer) {
-        clearTimeout(progressTimer);
+        clearAppTimeout(progressTimer);
         progressTimer = undefined;
       }
       if (!pendingProgress) return progressQueue;
@@ -263,7 +297,7 @@ export class ParseOrchestrator {
       this.progressBus.publish(latestProgress);
       pendingProgress = persistedProgress(latestProgress);
       if (!progressTimer) {
-        progressTimer = setTimeout(() => {
+        progressTimer = setAppTimeout(() => {
           progressTimer = undefined;
           void flushProgress();
         }, 750);
@@ -469,8 +503,9 @@ export class ParseOrchestrator {
       }
       return failed;
     } finally {
-        if (progressTimer) clearTimeout(progressTimer);
-        clearTimeout(timeout);
+        if (this.activeControllers.get(sourceId) === controller) this.activeControllers.delete(sourceId);
+        if (progressTimer) clearAppTimeout(progressTimer);
+        clearAppTimeout(timeout);
         options.signal?.removeEventListener("abort", abort);
     }
   }

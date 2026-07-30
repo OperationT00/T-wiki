@@ -2,6 +2,15 @@
 
 All notable changes to T-Wiki are documented in this file.
 
+## Unreleased
+
+- Add streamed local audio/video intake with immutable ObjectStore storage.
+- Add public Bilibili caption capture with multi-part and language selection.
+- Add explicit-consent Douyin public-video acquisition through a user-installed yt-dlp, with optional one-task browser-cookie retry.
+- Add explicit-consent remote transcription through OpenAI-compatible and Whisper ASR Webservice protocols.
+- Publish deterministic timestamped transcripts to `raw/audio/` and `raw/videos/` without changing the Ingest workflow.
+- Generate concise media titles from representative transcripts and name new raw documents as `author-id - content-summary` with deterministic fallback.
+
 ## 0.1.1
 
 - Change the Obsidian plugin ID from `llm-wiki` to the unique community ID `t-wiki`.

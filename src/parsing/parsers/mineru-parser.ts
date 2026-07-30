@@ -1,8 +1,11 @@
 import { strFromU8, unzipSync } from "fflate";
+import { clearAppTimeout, setAppTimeout } from "../../utils/timers";
 
 import type { HttpClientPort, HttpResponse } from "../http-client";
 import {
   ParserError,
+  parseInputSize,
+  parseInputSource,
   throwIfAborted,
   type DocumentParser,
   type ParseContext,
@@ -82,8 +85,8 @@ export class MinerUParser implements DocumentParser {
     parseMinerUOptions(options);
   }
 
-  probe(input: ParseInput): ProbeResult {
-    const magic = new TextDecoder("ascii").decode(input.bytes.subarray(0, 5)) === "%PDF-";
+  async probe(input: ParseInput): Promise<ProbeResult> {
+    const magic = new TextDecoder("ascii").decode(await parseInputSource(input).readHead(5)) === "%PDF-";
     return {
       supported: magic,
       confidence: magic ? 1 : 0,
@@ -93,7 +96,7 @@ export class MinerUParser implements DocumentParser {
   }
 
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
-    if (!this.probe(input).supported) throw new ParserError("UNSUPPORTED_FORMAT", "MinerU 首期仅支持 PDF");
+    if (!(await this.probe(input)).supported) throw new ParserError("UNSUPPORTED_FORMAT", "MinerU 首期仅支持 PDF");
     throwIfAborted(context.signal);
     const options = parseMinerUOptions(context.options);
     const transport = this.transports[options.protocol];
@@ -172,7 +175,13 @@ export class MinerUCloudV4Transport implements MinerUTransport {
     if (!batchId || typeof uploadUrl !== "string" || !isHttpUrl(uploadUrl)) {
       throw invalidResult("MinerU Cloud 未返回有效的 batch_id/file_url");
     }
-    await uploadWithRetry(this.http, uploadUrl, input.bytes, options.pollIntervalMs, context?.signal);
+    await uploadWithRetry(
+      this.http,
+      uploadUrl,
+      await parseInputSource(input).readAll(parseInputSize(input)),
+      options.pollIntervalMs,
+      context?.signal
+    );
     return { protocol: this.protocol, id: batchId, fileName: input.name, dataId: input.sourceId };
   }
 
@@ -273,7 +282,7 @@ export class MinerUSelfHostedTransport implements MinerUTransport {
   }
 
   async submit(input: ParseInput, options: MinerUOptions): Promise<MinerUTask> {
-    const multipart = buildMultipart(input, options);
+    const multipart = await buildMultipart(input, options);
     const response = await safeRequest(this.http, {
       url: joinUrl(options.baseUrl, "/tasks"),
       method: "POST",
@@ -484,7 +493,7 @@ function parseMinerUArchive(bytes: Uint8Array): MinerUResult {
   return { markdown, assets, issues };
 }
 
-function buildMultipart(input: ParseInput, options: MinerUOptions): { contentType: string; body: Uint8Array } {
+async function buildMultipart(input: ParseInput, options: MinerUOptions): Promise<{ contentType: string; body: Uint8Array }> {
   const boundary = `----llm-wiki-${input.sourceHash.slice(0, 24)}`;
   const encoder = new TextEncoder();
   const chunks: Uint8Array[] = [];
@@ -502,7 +511,7 @@ function buildMultipart(input: ParseInput, options: MinerUOptions): { contentTyp
     `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${safeHeaderValue(input.name)}"\r\n`
     + `Content-Type: ${input.mime || "application/octet-stream"}\r\n\r\n`
   ));
-  chunks.push(input.bytes);
+  chunks.push(await parseInputSource(input).readAll(parseInputSize(input)));
   chunks.push(encoder.encode(`\r\n--${boundary}--\r\n`));
   return { contentType: `multipart/form-data; boundary=${boundary}`, body: concatBytes(chunks) };
 }
@@ -837,12 +846,12 @@ function sanitizeMessage(value: string): string {
 function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(new ParserError("PARSE_CANCELLED", "解析已取消", true));
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = setAppTimeout(() => {
       signal.removeEventListener("abort", abort);
       resolve();
     }, ms);
     const abort = (): void => {
-      clearTimeout(timer);
+      clearAppTimeout(timer);
       reject(new ParserError("PARSE_CANCELLED", "解析已取消", true));
     };
     signal.addEventListener("abort", abort, { once: true });
@@ -850,5 +859,5 @@ function waitWithSignal(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 function waitWithoutSignal(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise<void>((resolve) => setAppTimeout(resolve, ms));
 }

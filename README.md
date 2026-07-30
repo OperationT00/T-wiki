@@ -6,7 +6,7 @@ T-Wiki 是一个桌面端 Obsidian 插件，用于把文档、网页和剪藏内
 
 ## 功能简介
 
-- 导入 Markdown、TXT、文本型 PDF 和公开网页
+- 导入 Markdown、TXT、文本型 PDF、本地音视频、公开网页、Bilibili 和抖音公开视频
 - 将不同来源统一解析为干净的 `raw/` Markdown
 - 使用 PDF.js 本地解析 PDF，并可选用 MinerU 处理扫描件或复杂 PDF
 - 使用用户配置的 LLM API 提取、比较和合并知识
@@ -56,15 +56,27 @@ Ingest 和 Query 会把相关的 raw Markdown 与 Wiki 上下文发送到所配�
 
 - **MinerU**：在设置的“文档解析 / MinerU”中选择 Cloud 或自托管服务，填写 Token 后启用。扫描型或复杂 PDF 可自动回退到 MinerU，也可以手动选择“使用 MinerU 重新解析”。启用远程 MinerU 会上传 PDF 原件。
 - **Web Clipper Inbox**：配置 Obsidian Web Clipper 的保存目录后，T-Wiki 可以扫描其中的新 Markdown。导入后只生成 raw，不会自动执行 Ingest。
+- **Bilibili**：在“解析在线视频”中输入 BV/AV/b23 地址。优先读取公开作者字幕或平台 AI 字幕；没有字幕时才提供远程语音转写选项。
+- **抖音**：先安装 [yt-dlp](https://github.com/yt-dlp/yt-dlp)，然后在“在线视频 / 抖音”中自动检测或填写 `yt-dlp.exe` 路径并启用。通过“解析在线视频”输入公开单视频链接；插件会在确认后下载视频并复用 ASR、FFmpeg 和视觉解析。默认不读取浏览器 Cookie，只有抖音明确要求登录时才会请求一次性授权。
+- **音视频转写**：在“音视频解析”中选择 OpenAI-compatible `/audio/transcriptions` 或自托管 Whisper ASR Webservice `/asr`。媒体原件先保存在本地 ObjectStore，每次上传都需要单独确认；OpenAI-compatible 单文件最多 25 MiB，大文件建议使用带 FFmpeg 的自托管 Whisper。
+- **本地视频关键画面**：可在“音视频解析 → 关键画面”中启用。先配置本机 FFmpeg/FFprobe，再填写独立的 OpenAI-compatible 视觉 Base URL、Token 和图片模型。插件只上传候选帧的 512px 缩略图及其前后 30 秒文字；视觉失败会保留纯文字稿，不阻断后续 Ingest。
+- **音视频智能标题**：ASR 完成后，插件会调用 Agent 的快速模型，根据代表性文字稿生成简短的内容标题，并按“作者 ID - 内容简述”命名新 raw 文档。没有平台作者 ID 时使用作者名，本地文件回退为 `local`；模型失败只会回退到来源标题，不影响解析结果发布。
 
 ### 4. 导入并生成 Wiki
 
-1. 在“素材”页选择文件、抓取网页或扫描 Clipper Inbox。
+1. 在“素材”页选择文件、抓取网页、解析 Bilibili/抖音视频，或扫描 Clipper Inbox。音视频处理前请核对远程上传目标。
 2. 等待解析完成，并按需查看 Markdown 预览和质量报告。
 3. 点击“开始 Ingest”。
 4. Agent 会读取来源、比较已有 Wiki，并生成新增或更新建议。
 5. 在 Diff 中审阅变更，确认后写入 Wiki。
 6. 在“智能”页面提问，或继续导入其他资料。
+
+## 权限与隐私
+
+- 默认文档与 Wiki 操作只访问当前 Vault；Clipper 仅扫描配置的 Inbox，索引仅遍历 `raw/` 和 `wiki/`。
+- FFmpeg、FFprobe 和 yt-dlp 是可选桌面能力，仅在用户启用并主动发起音视频任务时以参数数组执行，不会向 LLM 暴露 Shell。
+- LLM、MinerU、ASR 和视觉服务可能接收相关正文或媒体；Token 仅保存到 Obsidian Secret Storage，远程媒体上传按任务确认。
+- 详细的安全边界见 [SECURITY.md](SECURITY.md)。
 
 ## 常用命令
 

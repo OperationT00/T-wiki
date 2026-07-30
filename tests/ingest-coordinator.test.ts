@@ -698,7 +698,7 @@ function wikiPage(path: string, content: string): WikiPage {
 
 function settings(): PluginSettings {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     agent: {
       protocol: "anthropic-messages",
       baseUrl: "https://api.example.com",
@@ -717,6 +717,7 @@ function settings(): PluginSettings {
     activeTab: "home",
     sessions: [],
     activeSessionId: "",
-    webClipper: { enabled: false, inboxPath: "Clippings", scanExistingOnStartup: false }
+    webClipper: { enabled: false, inboxPath: "Clippings", scanExistingOnStartup: false },
+    onlineVideo: { douyin: { enabled: false, ytDlpPath: "", maxDownloadBytes: 524_288_000, taskTimeoutMs: 1_800_000, cookieBrowser: "edge" } }
   };
 }

@@ -14,28 +14,35 @@
     "dev": "node esbuild.config.mjs development",
     "build:dev-install": "node esbuild.config.mjs install",
     "build": "node esbuild.config.mjs production",
+    "lint": "eslint src --quiet",
+    "lint:report": "eslint src",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
-    "verify": "npm run typecheck && npm run test && npm run build",
+    "test": "tsx --import ./tests/setup.ts --test tests/**/*.test.ts",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
     "release:check": "node scripts/check-release.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
     "defuddle": "0.19.2",
     "fflate": "^0.8.2",
-    "js-yaml": "^4.1.0",
     "jsonrepair": "^3.13.1",
     "openai": "^6.49.0",
-    "pdfjs-dist": "^5.4.530"
+    "pdfjs-dist": "^5.4.530",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
+    "@eslint/js": "^9.39.4",
     "@types/jsdom": "^27.0.0",
     "@types/node": "^22.15.0",
     "esbuild": "^0.25.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-obsidianmd": "^0.4.0",
+    "globals": "^17.6.0",
+    "jiti": "^2.6.1",
     "jsdom": "^29.1.1",
     "obsidian": "latest",
     "tsx": "^4.20.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.59.1"
   }
 }

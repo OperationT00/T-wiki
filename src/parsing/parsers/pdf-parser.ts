@@ -1,10 +1,13 @@
 import type { ParseIssue, ParsePayload } from "../../types";
+import { clearAppTimeout, setAppTimeout, type AppTimer } from "../../utils/timers";
 import { WorkerMessageHandler } from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import { issue, normalizeMarkdownBody } from "../normalizer";
 import {
   OcrRequiredError,
   ParserError,
   numericOption,
+  parseInputSize,
+  parseInputSource,
   throwIfAborted,
   type DocumentParser,
   type ParseContext,
@@ -76,8 +79,8 @@ export class PdfParser implements DocumentParser {
     }
   }
 
-  probe(input: ParseInput): ProbeResult {
-    const header = new TextDecoder("ascii").decode(input.bytes.subarray(0, 5));
+  async probe(input: ParseInput): Promise<ProbeResult> {
+    const header = new TextDecoder("ascii").decode(await parseInputSource(input).readHead(5));
     const magic = header === "%PDF-";
     return {
       supported: magic,
@@ -88,7 +91,7 @@ export class PdfParser implements DocumentParser {
   }
 
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
-    if (!this.probe(input).supported) throw new ParserError("UNSUPPORTED_FORMAT", "文件不是有效的 PDF");
+    if (!(await this.probe(input)).supported) throw new ParserError("UNSUPPORTED_FORMAT", "文件不是有效的 PDF");
     throwIfAborted(context.signal);
     const maxPdfPages = numericOption(context.options, "maxPdfPages", 1000);
     const maxPdfTextItems = numericOption(context.options, "maxPdfTextItems", 2_000_000);
@@ -99,7 +102,8 @@ export class PdfParser implements DocumentParser {
     const deadline = Date.now() + timeoutMs;
     configurePdfJsWorker();
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const task = pdfjs.getDocument({ data: input.bytes, disableWorker: true } as any);
+    const bytes = await parseInputSource(input).readAll(parseInputSize(input));
+    const task = pdfjs.getDocument({ data: bytes, disableWorker: true } as any);
     let document: any;
     try {
       document = await withTimeout(task.promise, remainingTimeout(deadline));
@@ -206,7 +210,7 @@ export class PdfParser implements DocumentParser {
 }
 
 function configurePdfJsWorker(): void {
-  const runtime = globalThis as typeof globalThis & {
+  const runtime = window as typeof window & {
     pdfjsWorker?: { WorkerMessageHandler: unknown };
   };
   runtime.pdfjsWorker ??= { WorkerMessageHandler };
@@ -455,16 +459,16 @@ function median(values: number[]): number {
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: AppTimer | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new ParserError("PARSE_TIMEOUT", "PDF 解析超时", true)), timeoutMs);
+        timer = setAppTimeout(() => reject(new ParserError("PARSE_TIMEOUT", "PDF 解析超时", true)), timeoutMs);
       })
     ]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer) clearAppTimeout(timer);
   }
 }
 

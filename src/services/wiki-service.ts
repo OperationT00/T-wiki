@@ -1,4 +1,4 @@
-import { TFile, type App, type DataAdapter, type Vault } from "obsidian";
+import { TFile, TFolder, type App, type DataAdapter, type Vault } from "obsidian";
 
 import {
   canonicalizePage,
@@ -26,6 +26,7 @@ import {
 import { migrateSourceRawReference } from "../parsing/migration";
 import { toPipelineError } from "../parsing/pipeline-errors";
 import type { ParserRegistry } from "../parsing/parser-registry";
+import type { SourceBody } from "../parsing/parser-types";
 import type { IntakeProvenance } from "./intake-service";
 import type {
   IngestInput,
@@ -67,6 +68,8 @@ interface TransactionJournal {
 
 interface DocumentParserWithConnection {
   testConnection?(options: Readonly<Record<string, unknown>>): Promise<{ ok: boolean; message: string }>;
+  testVisualConnection?(options: Readonly<Record<string, unknown>>): Promise<{ ok: boolean; message: string }>;
+  testFfmpeg?(options: Readonly<Record<string, unknown>>): Promise<{ ok: boolean; message: string }>;
 }
 
 export interface MigrationPreview {
@@ -153,8 +156,8 @@ export class WikiService {
         const manifestRoot = `${config.paths?.internal ?? ".llm-wiki"}/manifests`;
         const hasManifests = await this.adapter.exists(manifestRoot)
           && (await this.adapter.list(manifestRoot)).files.some((path) => path.endsWith(".json"));
-        parsingFrameworkV2 = config.schemaVersion === 2 && hasManifests;
-        legacyConfig = config.schemaVersion !== 3;
+        parsingFrameworkV2 = (config.schemaVersion === 2 || config.schemaVersion === 3) && hasManifests;
+        legacyConfig = config.schemaVersion !== 4;
       } catch {
         legacyConfig = true;
       }
@@ -177,7 +180,7 @@ export class WikiService {
     const preservedState = preview.parsingFrameworkV2 ? structuredClone(await this.loadState()) : null;
     let configWrittenDuringMigration = false;
     const folders = [
-      `${config.paths.raw}/articles`, `${config.paths.raw}/videos`,
+      `${config.paths.raw}/articles`, `${config.paths.raw}/audio`, `${config.paths.raw}/videos`,
       `${config.paths.raw}/documents`, `${config.paths.raw}/assets`,
       `${config.paths.wiki}/sources`, `${config.paths.wiki}/entities`,
       `${config.paths.wiki}/concepts`, `${config.paths.wiki}/synthesis`,
@@ -199,8 +202,7 @@ export class WikiService {
       }
       const legacyRawFiles = preview.parsingFrameworkV2
         ? []
-        : this.vault.getFiles()
-          .filter((file) => normalizeVaultPath(file.path).startsWith(`${config.paths.raw}/`))
+        : this.listVaultFilesUnder(config.paths.raw)
           .filter((file) => ["md", "txt", "pdf"].includes(file.extension.toLocaleLowerCase()));
       for (const file of legacyRawFiles) await this.backupBinaryPath(file.path, `${backupRoot}/${file.path}`);
       const manifestOriginals = new Map<string, string>();
@@ -302,10 +304,8 @@ export class WikiService {
   }
 
   async readPagesFromPath(root: string): Promise<WikiPage[]> {
-    const prefix = `${normalizeVaultPath(root).replace(/\/$/, "")}/`;
     const pages: WikiPage[] = [];
-    for (const file of this.vault.getMarkdownFiles()) {
-      if (!normalizeVaultPath(file.path).startsWith(prefix)) continue;
+    for (const file of this.listVaultFilesUnder(root).filter((item) => item.extension.toLocaleLowerCase() === "md")) {
       const content = await this.vault.cachedRead(file);
       const parsed = parseMarkdown(file.path, content);
       if (parsed) pages.push(parsed);
@@ -386,9 +386,8 @@ export class WikiService {
   }
 
   private wikiFingerprint(config: WikiConfig): string {
-    const prefix = `${normalizeVaultPath(config.paths.wiki).replace(/\/$/, "")}/`;
-    const entries = this.vault.getMarkdownFiles()
-      .filter((file) => normalizeVaultPath(file.path).startsWith(prefix))
+    const entries = this.listVaultFilesUnder(config.paths.wiki)
+      .filter((file) => file.extension.toLocaleLowerCase() === "md")
       .map((file) => `${normalizeVaultPath(file.path)}\u0000${file.stat.mtime}\u0000${file.stat.size}`)
       .sort();
     return sha256(entries.join("\n"));
@@ -428,7 +427,7 @@ export class WikiService {
     if (!(await this.isInitialized())) return false;
     try {
       const config = JSON.parse(await this.adapter.read("llm-wiki.config.json")) as { schemaVersion?: number };
-      return config.schemaVersion !== 3;
+      return config.schemaVersion !== 4;
     } catch {
       return true;
     }
@@ -446,11 +445,11 @@ export class WikiService {
 
   async importSourceDetailed(
     name: string,
-    bytes: Uint8Array,
+    source: Uint8Array | SourceBody,
     provenance: IntakeProvenance
   ): Promise<{ manifest: SourceManifest; duplicate: boolean }> {
     await this.ensureParsingFrameworkCurrent();
-    return (await this.parsingService()).importSourceDetailed(name, bytes, provenance);
+    return (await this.parsingService()).importSourceDetailed(name, source, provenance);
   }
 
   async reparseSource(sourceId: string): Promise<SourceManifest> {
@@ -461,6 +460,14 @@ export class WikiService {
   async reparseSourceWith(sourceId: string, parserId: string): Promise<SourceManifest> {
     await this.ensureParsingFrameworkCurrent();
     return (await this.parsingService()).parseSourceWith(sourceId, parserId);
+  }
+
+  async cancelParse(sourceId: string): Promise<boolean> {
+    return (await this.parsingService()).cancelParse(sourceId);
+  }
+
+  dispose(): void {
+    this.parsing?.dispose();
   }
 
   async updateParsingProvider(
@@ -492,6 +499,22 @@ export class WikiService {
       .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
     if (!parser?.testConnection) throw new Error(`Parser 不支持连接测试：${providerId}`);
     return parser.testConnection(config.parsing.providers[providerId]?.options ?? {});
+  }
+
+  async testParserVisualConnection(providerId: string): Promise<{ ok: boolean; message: string }> {
+    const config = await this.loadConfig();
+    const parser = this.parserRegistryFactory?.().list()
+      .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
+    if (!parser?.testVisualConnection) throw new Error(`Parser 不支持视觉连接测试：${providerId}`);
+    return parser.testVisualConnection(config.parsing.providers[providerId]?.options ?? {});
+  }
+
+  async testParserFfmpeg(providerId: string): Promise<{ ok: boolean; message: string }> {
+    const config = await this.loadConfig();
+    const parser = this.parserRegistryFactory?.().list()
+      .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
+    if (!parser?.testFfmpeg) throw new Error(`Parser 不支持 FFmpeg 测试：${providerId}`);
+    return parser.testFfmpeg(config.parsing.providers[providerId]?.options ?? {});
   }
 
   async beginIngest(sourceId: string): Promise<{
@@ -666,7 +689,7 @@ export class WikiService {
         const file = this.vault.getAbstractFileByPath(change.path);
         if (change.before === null) {
           if (!(file instanceof TFile)) throw new Error(`回滚删除目标不存在：${change.path}`);
-          await this.vault.delete(file, true);
+          await this.app.fileManager.trashFile(file);
           deletedPaths.push(change.path);
         } else if (file instanceof TFile) {
           await this.vault.modify(file, change.before);
@@ -863,7 +886,7 @@ export class WikiService {
     for (const [path, original] of Object.entries(journal.originals).reverse()) {
       const file = this.vault.getAbstractFileByPath(path);
       if (original === null) {
-        if (file instanceof TFile) await this.vault.delete(file, true);
+        if (file instanceof TFile) await this.app.fileManager.trashFile(file);
       } else if (file instanceof TFile) {
         await this.vault.modify(file, original);
       } else {
@@ -1068,7 +1091,7 @@ export class WikiService {
       await this.vault.rename(temp, path);
     } catch (error) {
       const current = this.vault.getAbstractFileByPath(tempPath);
-      if (current instanceof TFile) await this.vault.delete(current, true);
+      if (current instanceof TFile) await this.adapter.remove(tempPath);
       throw error;
     }
   }
@@ -1078,7 +1101,8 @@ export class WikiService {
     const legacyState = await this.readLegacyRawState();
     const parsing = await this.parsingService();
     const manifestsBefore = new Set((await parsing.listSources()).map((manifest) => manifest.sourceId));
-    const rawBefore = new Set(this.vault.getFiles().map((file) => normalizeVaultPath(file.path)));
+    const rawBefore = new Set(this.listVaultFilesUnder(this.config!.paths.raw)
+      .map((file) => normalizeVaultPath(file.path)));
     const objectRoot = `${this.config!.paths.internal}/objects`;
     const internalBefore = new Set(await listAdapterFilesRecursive(this.adapter, objectRoot));
     const sourceOriginals = new Map<string, string>();
@@ -1125,7 +1149,7 @@ export class WikiService {
 
       for (const file of files) {
         const current = this.vault.getAbstractFileByPath(file.path);
-        if (current instanceof TFile) await this.vault.delete(current, true);
+        if (current instanceof TFile) await this.app.fileManager.trashFile(current);
       }
     } catch (error) {
       for (const [path, content] of sourceOriginals) {
@@ -1143,7 +1167,7 @@ export class WikiService {
         for (const revision of manifest.parse.revisions) {
           if (!rawBefore.has(revision.rawPath) && await this.adapter.exists(revision.rawPath)) {
             const rawFile = this.vault.getAbstractFileByPath(revision.rawPath);
-            if (rawFile instanceof TFile) await this.vault.delete(rawFile, true);
+            if (rawFile instanceof TFile) await this.app.fileManager.trashFile(rawFile);
             else await this.adapter.remove(revision.rawPath);
           }
         }
@@ -1183,7 +1207,25 @@ export class WikiService {
   }
 
   private async listAllPaths(): Promise<string[]> {
-    return this.vault.getFiles().map((file) => normalizeVaultPath(file.path));
+    const config = await this.loadConfig();
+    return [
+      ...this.listVaultFilesUnder(config.paths.raw),
+      ...this.listVaultFilesUnder(config.paths.wiki)
+    ].map((file) => normalizeVaultPath(file.path));
+  }
+
+  private listVaultFilesUnder(root: string): TFile[] {
+    const folder = this.vault.getFolderByPath(normalizeVaultPath(root));
+    if (!folder) return [];
+    const files: TFile[] = [];
+    const visit = (current: TFolder): void => {
+      for (const child of current.children) {
+        if (child instanceof TFile) files.push(child);
+        else if (child instanceof TFolder) visit(child);
+      }
+    };
+    visit(folder);
+    return files;
   }
 
   private async readClaudianNonSecretSettings(): Promise<MigrationPreview["claudian"]> {

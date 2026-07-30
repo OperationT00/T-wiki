@@ -4,7 +4,7 @@ import type { DataAdapter } from "obsidian";
 import { ArtifactBuilder } from "../parsing/artifact-builder";
 import { createDefaultParserRegistry } from "../parsing/default-parser-registry";
 import { ParseProgressBus, type ParseProgressListener } from "../parsing/parse-progress";
-import type { DocumentParser } from "../parsing/parser-types";
+import { sourceBodyFromBlob, type DocumentParser, type SourceBody } from "../parsing/parser-types";
 import { ParserRegistry } from "../parsing/parser-registry";
 import { toPipelineError } from "../parsing/pipeline-errors";
 import type {
@@ -69,11 +69,21 @@ export class ParsingFacade {
     return this.progressBus.subscribe(listener);
   }
 
+  cancelParse(sourceId: string): boolean {
+    return this.orchestrator.cancel(sourceId);
+  }
+
+  dispose(): void {
+    this.orchestrator.dispose();
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.store.initialize();
     await ensureFolder(this.adapter, `${this.config.paths.raw}/articles`);
     await ensureFolder(this.adapter, `${this.config.paths.raw}/documents`);
+    await ensureFolder(this.adapter, `${this.config.paths.raw}/audio`);
+    await ensureFolder(this.adapter, `${this.config.paths.raw}/videos`);
     await ensureFolder(this.adapter, `${this.config.paths.raw}/assets`);
     await this.orchestrator.initialize();
     await this.ingest.initialize();
@@ -83,28 +93,31 @@ export class ParsingFacade {
   async importFiles(files: File[]): Promise<SourceManifest[]> {
     const imported: SourceManifest[] = [];
     for (const file of files) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      imported.push(await this.importBytes(file.name, bytes));
+      imported.push((await this.importSourceDetailed(
+        file.name,
+        sourceBodyFromBlob(file),
+        { acquiredBy: "file-picker", deferParse: isMediaFileName(file.name) }
+      )).manifest);
     }
     return imported;
   }
 
   async importSource(
     name: string,
-    bytes: Uint8Array,
+    source: Uint8Array | SourceBody,
     provenance: IntakeProvenance
   ): Promise<SourceManifest> {
-    return (await this.importSourceDetailed(name, bytes, provenance)).manifest;
+    return (await this.importSourceDetailed(name, source, provenance)).manifest;
   }
 
   async importSourceDetailed(
     name: string,
-    bytes: Uint8Array,
+    source: Uint8Array | SourceBody,
     provenance: IntakeProvenance
   ): Promise<{ manifest: SourceManifest; duplicate: boolean }> {
     await this.initialize();
-    const intake = await this.intake.intake(name, bytes, provenance);
-    const manifest = intake.duplicate
+    const intake = await this.intake.intake(name, source, provenance);
+    const manifest = intake.duplicate || provenance.deferParse
       ? intake.manifest
       : this.orchestrator.parseSource(intake.manifest.sourceId);
     return { manifest: await manifest, duplicate: intake.duplicate };
@@ -243,6 +256,10 @@ export class ParsingFacade {
       return current;
     });
   }
+}
+
+function isMediaFileName(name: string): boolean {
+  return /\.(?:mp3|mp4|mpeg|mpga|m4a|wav|webm|mov|ogg|oga|flac|mkv|avi)$/i.test(name);
 }
 
 /** @deprecated Import ParsingFacade in new code. */

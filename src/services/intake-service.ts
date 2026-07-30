@@ -1,11 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import { sha256 } from "../core/wiki-core";
 import { sanitizeSourceUri } from "../parsing/source-uri";
 import { detectSource } from "../parsing/parser-registry";
-import { ParserError } from "../parsing/parser-types";
+import { ParserError, sourceBodyFromBytes, type SourceBody } from "../parsing/parser-types";
 import type { ManifestRepositoryPort, ObjectStorePort } from "../parsing/ports";
-import type { SourceKind, SourceManifest, WikiConfig } from "../types";
+import type { SourceKind, SourceManifest, SourceMetadata, WikiConfig } from "../types";
 
 export interface IntakeProvenance {
   kind?: SourceKind;
@@ -13,7 +12,10 @@ export interface IntakeProvenance {
   requestedUri?: string;
   capturedAt?: string;
   acquiredBy?: string;
+  metadata?: SourceMetadata;
   capture?: SourceManifest["source"]["capture"];
+  /** Keep the immutable source queued until the UI grants remote processing consent. */
+  deferParse?: boolean;
 }
 
 export interface LegacyIntakeState {
@@ -35,18 +37,22 @@ export class IntakeService {
 
   async intake(
     name: string,
-    bytes: Uint8Array,
+    input: Uint8Array | SourceBody,
     provenance: IntakeProvenance = {}
   ): Promise<{ manifest: SourceManifest; duplicate: boolean }> {
     await this.initialize();
-    if (bytes.byteLength > this.config.parsing.maxImportBytes) {
+    const source = input instanceof Uint8Array ? sourceBodyFromBytes(input) : input;
+    const detected = detectSource(name, await source.readHead(64));
+    const limit = detected.kind === "audio" || detected.kind === "video"
+      ? this.config.parsing.maxMediaImportBytes
+      : this.config.parsing.maxImportBytes;
+    if (source.size !== undefined && source.size > limit) {
       throw new ParserError(
         "FILE_TOO_LARGE",
-        `${name} 超过 ${Math.round(this.config.parsing.maxImportBytes / 1024 / 1024)} MB`
+        `${name} 超过 ${Math.round(limit / 1024 / 1024)} MB`
       );
     }
-    const detected = detectSource(name, bytes);
-    const sourceHash = sha256(bytes);
+    const { hash: sourceHash, size } = await hashSource(source, limit);
     const duplicate = await this.manifests.findByHash(sourceHash);
     if (duplicate) {
       const safeUri = sanitizeSourceUri(provenance.uri);
@@ -55,6 +61,7 @@ export class IntakeService {
         || (safeRequestedUri && !duplicate.source.requestedUri)
         || (provenance.capturedAt && !duplicate.source.capturedAt)
         || (provenance.capture && !duplicate.source.capture)
+        || (provenance.metadata && !duplicate.source.metadata)
         || (provenance.kind && duplicate.source.kind === "unknown")) {
         const updated = await this.manifests.update(
           duplicate.sourceId,
@@ -73,6 +80,9 @@ export class IntakeService {
             if (provenance.capture && !current.source.capture) {
               current.source.capture = structuredClone(provenance.capture);
             }
+            if (provenance.metadata && !current.source.metadata) {
+              current.source.metadata = structuredClone(provenance.metadata);
+            }
             return current;
           }
         );
@@ -80,7 +90,9 @@ export class IntakeService {
       }
       return { manifest: duplicate, duplicate: true };
     }
-    const objectPath = await this.objects.put(sourceHash, detected.extension, bytes);
+    const objectPath = this.objects.putBody
+      ? await this.objects.putBody(sourceHash, detected.extension, source)
+      : await this.objects.put(sourceHash, detected.extension, await source.readAll(limit));
     const importedAt = provenance.capturedAt ?? new Date().toISOString();
     const manifest = await this.manifests.create({
       schemaVersion: 3,
@@ -93,13 +105,14 @@ export class IntakeService {
         requestedUri: sanitizeSourceUri(provenance.requestedUri),
         capturedAt: provenance.capturedAt,
         acquiredBy: provenance.acquiredBy ?? "file-picker",
+        metadata: provenance.metadata ? structuredClone(provenance.metadata) : undefined,
         capture: provenance.capture ? structuredClone(provenance.capture) : undefined
       },
       original: {
         name,
         extension: detected.extension,
         mime: detected.mime,
-        size: bytes.byteLength,
+        size,
         objectPath,
         importedAt
       },
@@ -115,4 +128,15 @@ export class IntakeService {
     });
     return { manifest, duplicate: false };
   }
+}
+
+async function hashSource(source: SourceBody, maxBytes: number): Promise<{ hash: string; size: number }> {
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of source.openStream()) {
+    size += chunk.byteLength;
+    if (size > maxBytes) throw new ParserError("FILE_TOO_LARGE", `Source exceeds ${maxBytes} bytes`);
+    hash.update(chunk);
+  }
+  return { hash: hash.digest("hex"), size };
 }
