@@ -82,6 +82,50 @@ test("VideoVisualPipeline uses fake extractor/provider, returns timestamped asse
   await assert.rejects(access(workingDirectory));
 });
 
+test("visual batches keep successful frames when another batch fails", async () => {
+  const extractor: VideoFrameExtractor = {
+    async fingerprint() { return "ffmpeg partial"; },
+    async probe() { return { durationMs: 3_600_000, width: 1280, height: 720, ffmpegVersion: "ffmpeg partial" }; },
+    async extract(_path, options) {
+      const candidates = [];
+      for (let index = 0; index < 13; index += 1) {
+        const imagePath = join(options.workingDirectory, `frame-${index}.webp`);
+        const thumbnailPath = join(options.workingDirectory, `thumb-${index}.webp`);
+        await writeFile(imagePath, Buffer.from(`full-${index}`));
+        await writeFile(thumbnailPath, Buffer.from(`thumb-${index}`));
+        candidates.push({
+          frameId: `frame-${index}`,
+          timestampMs: index * 10_000,
+          imagePath,
+          thumbnailPath,
+          mime: "image/webp" as const
+        });
+      }
+      return candidates;
+    }
+  };
+  let batches = 0;
+  const provider: FrameSelectionProvider = {
+    async assess(frames) {
+      batches += 1;
+      if (batches === 1) throw new Error("temporary vision failure");
+      return frames.map((frame) => assessment(frame.frameId, 0.95, "diagram"));
+    },
+    async testConnection() { return { ok: true, message: "ok" }; }
+  };
+  const options = visualOptions();
+  options.vision.batchSize = 12;
+  const result = await new VideoVisualPipeline(extractor, provider, options).analyze(
+    sourceBodyFromBytes(encoder.encode("video")),
+    "partial.mp4",
+    transcript(),
+    context()
+  );
+  assert.equal(batches, 2);
+  assert.equal(result.frames.length, 1);
+  assert.ok(result.issues.some((issue) => issue.code === "VIDEO_VISUAL_PARTIAL"));
+});
+
 test("visual assessment validation rejects unknown IDs and malformed scores", () => {
   assert.throws(() => parseAssessments(JSON.stringify({ assessments: [assessment("invented", 0.9, "slide")] }), new Set(["expected"])), /未知或重复/);
   assert.throws(() => parseAssessments(JSON.stringify({ assessments: [{ ...assessment("expected", 0.9, "slide"), confidence: 2 }] }), new Set(["expected"])), /valuable\/confidence/);

@@ -473,7 +473,9 @@ export class WorkbenchView extends ItemView {
         remove.disabled = false;
       }
     };
-    if (source.parse.status === "parse_failed") {
+    const resumableMediaAttempt = [...source.parse.attempts].reverse().find((attempt) =>
+      attempt.parserId === "media-transcription" && Boolean(attempt.resumeToken));
+    if (source.parse.status === "parse_failed" && !resumableMediaAttempt) {
       const reparse = card.createEl("button", { text: "重新解析" });
       reparse.onclick = async () => {
         reparse.disabled = true;
@@ -506,13 +508,18 @@ export class WorkbenchView extends ItemView {
       && parserId !== "bilibili-caption"
       && (source.parse.status === "queued" || source.parse.status === "parse_failed" || source.parse.status === "parsed")) {
       const transcribe = card.createEl("button", {
-        text: source.parse.status === "parse_failed"
+        text: resumableMediaAttempt
+          ? "继续解析"
+          : source.parse.status === "parse_failed"
           ? "重试远程转写"
           : source.parse.status === "parsed" ? "重新生成文字稿" : "开始远程转写",
         cls: "mod-cta"
       });
       transcribe.onclick = async () => {
         const options = mediaProvider.options;
+        const preprocessing = options.preprocessing && typeof options.preprocessing === "object"
+          ? options.preprocessing as Record<string, unknown>
+          : {};
         const visual = options.visual && typeof options.visual === "object"
           ? options.visual as Record<string, unknown>
           : {};
@@ -523,7 +530,7 @@ export class WorkbenchView extends ItemView {
           ? [
             "",
             "关键画面已启用：",
-            `本地 FFmpeg：${String(visual.ffmpegPath || "PATH 自动查找")}`,
+            `本地 FFmpeg：${String(preprocessing.ffmpegPath || visual.ffmpegPath || "PATH 自动查找")}`,
             `视觉服务：${String(vision.baseUrl ?? "")}`,
             `视觉模型：${String(vision.model ?? "")}`,
             "将上传候选帧的 512px 缩略图与前后 30 秒文字，不上传完整视频。"
@@ -537,6 +544,11 @@ export class WorkbenchView extends ItemView {
           `协议：${String(options.protocol ?? "openai-transcriptions")}`,
           `服务：${String(options.baseUrl ?? "")}`,
           `模型：${String(options.model ?? "")}`,
+          `媒体预处理：${preprocessing.enabled === false ? "关闭，可能上传完整原件" : "开启，上传 16 kHz 单声道音频分片"}`,
+          ...(preprocessing.enabled === false ? [] : [
+            `分片：${Math.round(Number(preprocessing.chunkDurationSeconds ?? 900) / 60)} 分钟，重叠 ${Number(preprocessing.overlapSeconds ?? 2)} 秒`,
+            "中断后会保留已完成分片；继续前仍需再次确认远程上传。"
+          ]),
           `标题生成：${titleModel?.id ?? "未配置 fast 模型"}`,
           "标题生成会把最多约 8,000 字的代表性文字稿发送给 Agent API。",
           ...visualLines,
@@ -550,13 +562,31 @@ export class WorkbenchView extends ItemView {
         transcribe.disabled = true;
         try {
           this.plugin.mediaUploadConsent.approve(source.sourceId);
-          await this.plugin.wiki.reparseSourceWith(source.sourceId, "media-transcription");
+          if (resumableMediaAttempt) {
+            await this.plugin.wiki.resumeSourceWith(source.sourceId, "media-transcription");
+          } else {
+            await this.plugin.wiki.reparseSourceWith(source.sourceId, "media-transcription");
+          }
         } catch (error) {
           new Notice(error instanceof Error ? error.message : String(error));
         } finally {
           await this.render();
         }
       };
+      if (resumableMediaAttempt) {
+        const discard = card.createEl("button", { text: "放弃并清理断点" });
+        discard.onclick = async () => {
+          if (!await confirmAction(this.app, "清理媒体断点", "将删除已生成的音频分片和规范化转写缓存，但不会删除 ObjectStore 中的原始媒体。", "确认清理", true)) return;
+          discard.disabled = true;
+          try {
+            await this.plugin.wiki.discardMediaResume(source.sourceId);
+          } catch (error) {
+            new Notice(error instanceof Error ? error.message : String(error));
+          } finally {
+            await this.render();
+          }
+        };
+      }
     }
     if (mediaProvider?.enabled !== true
       && (source.source.kind === "audio" || source.source.kind === "video")
@@ -1518,6 +1548,17 @@ function progressPhaseLabel(phase: string): string {
     case "preparing": return "正在准备原件";
     case "probing": return "正在选择解析器";
     case "uploading": return "正在上传文档";
+    case "preparing-media": return "正在准备媒体";
+    case "reading-media-info": return "正在读取媒体信息";
+    case "extracting-audio": return "正在提取音频";
+    case "uploading-chunk": return "正在上传音频分片";
+    case "transcribing-chunk": return "正在转写音频分片";
+    case "merging-transcript": return "正在合并时间轴";
+    case "extracting-frames": return "正在提取关键帧";
+    case "filtering-frames": return "正在筛选关键帧";
+    case "visual-analysis": return "正在分析关键画面";
+    case "building-markdown": return "正在生成 Markdown";
+    case "quality-check": return "正在执行完整性校验";
     case "parsing": return "正在解析文档";
     case "downloading": return "正在下载解析结果";
     case "normalizing": return "正在标准化 Markdown";

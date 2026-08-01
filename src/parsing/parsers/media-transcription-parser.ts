@@ -7,6 +7,8 @@ import { assertVideoVisualReady } from "../media/video-visual-options";
 import { DEFAULT_VIDEO_VISUAL_OPTIONS } from "../media/video-visual-options";
 import { VideoVisualPipeline } from "../media/video-visual-pipeline";
 import { MediaTimelineComposer } from "../media/media-timeline-composer";
+import { ChunkedTranscriptionCoordinator } from "../media/chunked-transcription-coordinator";
+import type { MediaJobStorePort } from "../media/media-job";
 import {
   composeMediaDocumentTitle,
   resolveMediaAuthorIdentity,
@@ -48,10 +50,11 @@ export class InMemoryMediaUploadConsent implements MediaUploadConsent {
 export class MediaTranscriptionParser implements DocumentParser {
   readonly descriptor = {
     id: "media-transcription",
-    version: "1.2.0",
+    version: "1.3.0",
     execution: "remote",
     supportedKinds: ["audio", "video"],
-    capabilities: { sourceMap: false, assets: true, resumable: false }
+    capabilities: { sourceMap: false, assets: true, resumable: true },
+    resumePolicy: "user-confirmed"
   } as const;
 
   constructor(
@@ -60,11 +63,24 @@ export class MediaTranscriptionParser implements DocumentParser {
     private readonly builder = new TranscriptMarkdownBuilder(),
     private readonly visionCredentials: VisionCredentials = { async getToken() { return ""; } },
     private readonly visualFactory?: (options: VideoVisualOptions) => VideoVisualAnalyzer,
-    private readonly titleGenerator?: TranscriptTitleGenerator
+    private readonly titleGenerator?: TranscriptTitleGenerator,
+    private readonly mediaJobs?: MediaJobStorePort
   ) {}
 
   validateOptions(options: Readonly<Record<string, unknown>>): void {
     parseMediaTranscriptionOptions(options);
+  }
+
+  async initialize(): Promise<void> {
+    await this.mediaJobs?.prune();
+  }
+
+  async reconcileSources(sources: ReadonlyMap<string, string>): Promise<void> {
+    await this.mediaJobs?.prune(new Date(), sources);
+  }
+
+  async cleanupSource(sourceId: string): Promise<void> {
+    await this.mediaJobs?.cleanupSource(sourceId);
   }
 
   probe(input: ParseInput): ProbeResult {
@@ -78,12 +94,25 @@ export class MediaTranscriptionParser implements DocumentParser {
     signal: AbortSignal
   ): Promise<unknown> {
     const options = parseMediaTranscriptionOptions(optionsInput);
-    const visualOptions = options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS;
+    const visualOptions = withSharedFfmpeg(options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS, options.preprocessing?.ffmpegPath);
     const title = this.titleGenerator?.fingerprint?.();
-    if (input.kind !== "video" || !visualOptions.enabled) return title ? { title } : undefined;
+    let preprocessingFingerprint: string | undefined;
+    if (options.preprocessing?.enabled && this.mediaJobs) {
+      try {
+        preprocessingFingerprint = await new FfmpegFrameExtractor(options.preprocessing.ffmpegPath).fingerprint(signal);
+      } catch {
+        preprocessingFingerprint = "unavailable";
+      }
+    }
+    if (input.kind !== "video" || !visualOptions.enabled) {
+      return title || preprocessingFingerprint
+        ? { ...(title ? { title } : {}), preprocessingFfmpeg: preprocessingFingerprint }
+        : undefined;
+    }
     try {
       return {
         ...(title ? { title } : {}),
+        preprocessingFfmpeg: preprocessingFingerprint,
         ffmpeg: await this.createVisualPipeline(visualOptions).fingerprint(signal),
         visionModel: visualOptions.vision.model
       };
@@ -92,6 +121,7 @@ export class MediaTranscriptionParser implements DocumentParser {
       // prevents reusing an older visual revision while the runtime is absent.
       return {
         ...(title ? { title } : {}),
+        preprocessingFfmpeg: preprocessingFingerprint,
         ffmpeg: "unavailable",
         visionModel: visualOptions.vision.model
       };
@@ -99,21 +129,27 @@ export class MediaTranscriptionParser implements DocumentParser {
   }
 
   async parse(input: ParseInput, context: ParseContext): Promise<ParsePayload> {
+    return this.execute(input, context);
+  }
+
+  async resume(input: ParseInput, token: string, context: ParseContext): Promise<ParsePayload> {
+    return this.execute(input, context, token);
+  }
+
+  private async execute(input: ParseInput, context: ParseContext, resumeToken?: string): Promise<ParsePayload> {
     if (!this.consent.consume(input.sourceId)) {
       throw new ParserError("REMOTE_UPLOAD_CONSENT_REQUIRED", "远程转写需要本次任务的明确确认");
     }
     const options = parseMediaTranscriptionOptions(context.options);
     const transport = createTranscriptionTransport(options, this.credentials);
     const size = parseInputSize(input);
-    context.reportProgress({ phase: "uploading", completed: 0, total: size, unit: "byte", message: "准备上传媒体" });
-    const transcript = await transport.transcribe(parseInputSource(input), {
-      name: input.name,
-      mime: input.mime,
-      size
-    }, context);
+    const coordinator = new ChunkedTranscriptionCoordinator(this.mediaJobs);
+    context.reportProgress({ phase: "preparing-media", completed: 0, total: size, unit: "byte", message: "正在准备媒体转写" });
+    const coordinated = await coordinator.transcribe(input, transport, options, context, resumeToken);
+    const transcript = coordinated.transcript;
     let visual: Awaited<ReturnType<VideoVisualAnalyzer["analyze"]>> | undefined;
     const visualIssues = [];
-    const visualOptions = options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS;
+    const visualOptions = withSharedFfmpeg(options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS, options.preprocessing?.ffmpegPath);
     if (input.kind === "video" && visualOptions.enabled) {
       try {
         assertVideoVisualReady(visualOptions);
@@ -182,7 +218,7 @@ export class MediaTranscriptionParser implements DocumentParser {
       model: visualOptions.vision.model
     } : undefined);
     context.reportProgress({ phase: "quality-check", completed: 1, total: 1, unit: "document", message: "文字稿质量校验完成" });
-    return {
+    const payload: ParsePayload = {
       schemaVersion: 2,
       markdown: result.markdown,
       metadata: {
@@ -196,12 +232,16 @@ export class MediaTranscriptionParser implements DocumentParser {
         ...result.metadata
       },
       assets: visual?.assets ?? [],
-      issues: [...result.issues, ...visualIssues],
+      issues: [...result.issues, ...coordinated.warnings, ...visualIssues],
       stats: {
         durationMs: documentTranscript.durationMs,
-        visualFrameCount: visual?.frames.length ?? 0
+        visualFrameCount: visual?.frames.length ?? 0,
+        transcriptionChunkCount: coordinated.chunkCount,
+        emptyTranscriptionChunkCount: coordinated.emptyChunkCount
       }
     };
+    await coordinator.cleanup(coordinated.jobId);
+    return payload;
   }
 
   async testConnection(
@@ -216,7 +256,8 @@ export class MediaTranscriptionParser implements DocumentParser {
     optionsInput: Readonly<Record<string, unknown>>,
     signal = new AbortController().signal
   ): Promise<{ ok: boolean; message: string }> {
-    const options = parseMediaTranscriptionOptions(optionsInput).visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS;
+    const parsed = parseMediaTranscriptionOptions(optionsInput);
+    const options = withSharedFfmpeg(parsed.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS, parsed.preprocessing?.ffmpegPath);
     assertVideoVisualReady({ ...options, enabled: true });
     const provider = new OpenAICompatibleVisionProvider(options.vision, this.visionCredentials);
     return provider.testConnection(signal);
@@ -226,8 +267,9 @@ export class MediaTranscriptionParser implements DocumentParser {
     optionsInput: Readonly<Record<string, unknown>>,
     signal = new AbortController().signal
   ): Promise<{ ok: boolean; message: string }> {
-    const options = parseMediaTranscriptionOptions(optionsInput).visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS;
-    const version = await new FfmpegFrameExtractor(options.ffmpegPath).fingerprint(signal);
+    const options = parseMediaTranscriptionOptions(optionsInput);
+    const ffmpegPath = options.preprocessing?.ffmpegPath || options.visual?.ffmpegPath || "";
+    const version = await new FfmpegFrameExtractor(ffmpegPath).fingerprint(signal);
     return { ok: true, message: version };
   }
 
@@ -239,6 +281,10 @@ export class MediaTranscriptionParser implements DocumentParser {
       options
     );
   }
+}
+
+function withSharedFfmpeg(options: VideoVisualOptions, preprocessingPath: string | undefined): VideoVisualOptions {
+  return options.ffmpegPath || !preprocessingPath ? options : { ...options, ffmpegPath: preprocessingPath };
 }
 
 function metadataString(value: string | string[] | undefined): string | undefined {

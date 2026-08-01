@@ -72,6 +72,7 @@ export class VideoVisualPipeline implements VideoVisualAnalyzer {
       }
       context.reportProgress({ phase: "filtering-frames", completed: candidates.length, total: candidates.length, unit: "item", message: `本地筛选完成：${candidates.length} 张候选画面` });
       const assessments = [];
+      let failedBatches = 0;
       for (let offset = 0; offset < candidates.length; offset += this.options.vision.batchSize) {
         throwIfAborted(context.signal);
         const batch = candidates.slice(offset, offset + this.options.vision.batchSize);
@@ -83,7 +84,12 @@ export class VideoVisualPipeline implements VideoVisualAnalyzer {
           unit: "item",
           message: `正在判断关键画面（${Math.min(offset + batch.length, candidates.length)}/${candidates.length}）`
         });
-        assessments.push(...await this.provider.assess(inputs, context));
+        try {
+          assessments.push(...await this.provider.assess(inputs, context));
+        } catch (error) {
+          if (context.signal.aborted || (error instanceof ParserError && error.code === "PARSE_CANCELLED")) throw error;
+          failedBatches += 1;
+        }
       }
       const selectedLimit = densityLimit(
         metadata.durationMs,
@@ -121,7 +127,14 @@ export class VideoVisualPipeline implements VideoVisualAnalyzer {
           assetId: item.candidate.frameId
         });
       }
-      return { metadata, frames, assets, issues: [] };
+      const issues = failedBatches > 0 ? [{
+        code: assessments.length > 0 ? "VIDEO_VISUAL_PARTIAL" : "VIDEO_VISUAL_SKIPPED",
+        severity: "warning" as const,
+        message: assessments.length > 0
+          ? `${failedBatches} 个视觉批次失败，已保留其他批次的有效关键画面`
+          : "视觉服务未能完成任何批次，已发布纯文字稿"
+      }] : [];
+      return { metadata, frames, assets, issues };
     } finally {
       await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }

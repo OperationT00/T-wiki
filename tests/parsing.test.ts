@@ -667,6 +667,56 @@ test("resumable remote parser continues an interrupted attempt after restart", a
   assert.equal(manifest.parse.attempts.at(-1)?.resumeToken, undefined);
 });
 
+test("user-confirmed resumable parser pauses after restart until explicitly resumed", async () => {
+  const adapter = new MemoryAdapter();
+  let resumeCalls = 0;
+  const remote: DocumentParser = {
+    descriptor: {
+      id: "confirmed-remote",
+      version: "1.0.0",
+      execution: "remote",
+      supportedKinds: ["unknown"],
+      capabilities: { sourceMap: false, assets: false, resumable: true },
+      resumePolicy: "user-confirmed"
+    },
+    validateOptions: () => undefined,
+    probe: (input) => ({ supported: input.extension === "confirmed", confidence: 1 }),
+    parse: async () => ({ schemaVersion: 2, markdown: "# Initial\n", metadata: {}, assets: [], issues: [] }),
+    resume: async (_input, token) => {
+      assert.equal(token, "confirmed-job");
+      resumeCalls += 1;
+      return { schemaVersion: 2, markdown: "# Confirmed resume\n", metadata: {}, assets: [], issues: [] };
+    }
+  };
+  const first = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG, undefined, new ParserRegistry([remote]));
+  const imported = await first.importBytes("document.confirmed", new Uint8Array([4, 5, 6]));
+  const store = new SourceStore(adapter as unknown as DataAdapter, DEFAULT_CONFIG.paths.internal);
+  await store.updateManifest(imported.sourceId, imported.manifestRevision, (current) => {
+    current.parse.status = "parsing";
+    current.parse.startedAt = new Date().toISOString();
+    current.parse.attempts.push({
+      attemptId: "confirmed-attempt",
+      parseKey: imported.parse.revisions[0]!.parseKey,
+      parserId: "confirmed-remote",
+      parserVersion: "1.0.0",
+      status: "parsing",
+      startedAt: new Date().toISOString(),
+      resumeToken: "confirmed-job"
+    });
+    return current;
+  });
+  const recovered = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG, undefined, new ParserRegistry([remote]));
+  let manifest = await recovered.getSource(imported.sourceId);
+  assert.equal(resumeCalls, 0);
+  assert.equal(manifest.parse.status, "parse_failed");
+  assert.equal(manifest.parse.error?.code, "INTERRUPTED_RESUMABLE");
+  assert.equal(manifest.parse.attempts.at(-1)?.resumeToken, "confirmed-job");
+  manifest = await recovered.resumeSourceWith(imported.sourceId, "confirmed-remote");
+  assert.equal(resumeCalls, 1);
+  assert.equal(manifest.parse.status, "parsed");
+  assert.equal(manifest.parse.attempts.at(-1)?.resumeToken, undefined);
+});
+
 test("parser assets are published, rewritten, and hash verified", async () => {
   const adapter = new MemoryAdapter();
   const assetBytes = new Uint8Array([137, 80, 78, 71]);

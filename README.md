@@ -58,8 +58,8 @@ Ingest 和 Query 会把相关的 raw Markdown 与 Wiki 上下文发送到所配�
 - **Web Clipper Inbox**：配置 Obsidian Web Clipper 的保存目录后，T-Wiki 可以扫描其中的新 Markdown。导入后只生成 raw，不会自动执行 Ingest。
 - **Bilibili**：在“解析在线视频”中输入 BV/AV/b23 地址。优先读取公开作者字幕或平台 AI 字幕；没有字幕时才提供远程语音转写选项。
 - **抖音**：先安装 [yt-dlp](https://github.com/yt-dlp/yt-dlp)，然后在“在线视频 / 抖音”中自动检测或填写 `yt-dlp.exe` 路径并启用。通过“解析在线视频”输入公开单视频链接；插件会在确认后下载视频并复用 ASR、FFmpeg 和视觉解析。默认不读取浏览器 Cookie，只有抖音明确要求登录时才会请求一次性授权。
-- **音视频转写**：在“音视频解析”中选择 OpenAI-compatible `/audio/transcriptions` 或自托管 Whisper ASR Webservice `/asr`。媒体原件先保存在本地 ObjectStore，每次上传都需要单独确认；OpenAI-compatible 单文件最多 25 MiB，大文件建议使用带 FFmpeg 的自托管 Whisper。
-- **本地视频关键画面**：可在“音视频解析 → 关键画面”中启用。先配置本机 FFmpeg/FFprobe，再填写独立的 OpenAI-compatible 视觉 Base URL、Token 和图片模型。插件只上传候选帧的 512px 缩略图及其前后 30 秒文字；视觉失败会保留纯文字稿，不阻断后续 Ingest。
+- **音视频转写**：在“音视频解析”中选择 OpenAI-compatible `/audio/transcriptions` 或自托管 Whisper ASR Webservice `/asr`。默认由 FFmpeg 提取 16 kHz 单声道音频并按 15 分钟分片顺序转写；网络中断后可在 24 小时内继续，已完成分片不会重复上传。每次开始或恢复远程上传都需要单独确认。
+- **视频关键画面**：可在“音视频解析 → 关键画面”中启用。先配置共用的 FFmpeg/FFprobe，再填写独立的 OpenAI-compatible 视觉 Base URL、Token 和图片模型。插件合并场景抽帧与周期抽帧，只上传 512px 缩略图及其前后 30 秒文字；部分视觉批次失败时仍保留其他成功截图。
 - **音视频智能标题**：ASR 完成后，插件会调用 Agent 的快速模型，根据代表性文字稿生成简短的内容标题，并按“作者 ID - 内容简述”命名新 raw 文档。没有平台作者 ID 时使用作者名，本地文件回退为 `local`；模型失败只会回退到来源标题，不影响解析结果发布。
 
 ### 4. 导入并生成 Wiki

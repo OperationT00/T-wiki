@@ -110,9 +110,14 @@ export interface ParserDescriptor {
     assets: boolean;
     resumable: boolean;
   };
+  /** Resumable remote uploads may require fresh user consent after restart. */
+  resumePolicy?: "automatic" | "user-confirmed";
 }
 
 export interface ParseContext {
+  /** Always supplied by ParseOrchestrator; optional for external parser tests/adapters. */
+  attemptId?: string;
+  parseKey?: string;
   signal: AbortSignal;
   options: Readonly<Record<string, unknown>>;
   reportProgress(progress: ParseProgress): void;
@@ -121,6 +126,9 @@ export interface ParseContext {
 
 export interface DocumentParser {
   readonly descriptor: ParserDescriptor;
+  initialize?(): Promise<void>;
+  reconcileSources?(sources: ReadonlyMap<string, string>): Promise<void>;
+  cleanupSource?(sourceId: string): Promise<void>;
   validateOptions(options: Readonly<Record<string, unknown>>): void;
   probe(input: ProbeInput): Promise<ProbeResult> | ProbeResult;
   /**

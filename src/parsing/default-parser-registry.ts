@@ -13,6 +13,7 @@ import type { TranscriptionCredentials } from "./media/transcription-transports"
 import type { VisionCredentials } from "./media/video-visual-types";
 import type { TranscriptTitleGenerator } from "./media/transcript-title";
 import type { HttpClientPort } from "./http-client";
+import type { MediaJobStorePort } from "./media/media-job";
 
 /** Composition root for built-in parsers. */
 export function createDefaultParserRegistry(dependencies: {
@@ -22,6 +23,7 @@ export function createDefaultParserRegistry(dependencies: {
     consent: MediaUploadConsent;
     visionCredentials?: VisionCredentials;
     titleGenerator?: TranscriptTitleGenerator;
+    jobs?: MediaJobStorePort;
   };
 } = {}): ParserRegistry {
   const registry = new ParserRegistry()
@@ -43,7 +45,8 @@ export function createDefaultParserRegistry(dependencies: {
       undefined,
       dependencies.media.visionCredentials,
       undefined,
-      dependencies.media.titleGenerator
+      dependencies.media.titleGenerator,
+      dependencies.media.jobs
     ));
   }
   return registry;

@@ -18,16 +18,30 @@ export interface TimedTranscript {
   provider: string;
   model?: string;
   generated: boolean;
+  timePrecision?: "segment" | "chunk" | "none";
   issues: ParseIssue[];
 }
 
 export type TranscriptionProtocol = "openai-transcriptions" | "whisper-asr-webservice";
+export type TimestampUnit = "auto" | "seconds" | "milliseconds";
+
+export interface MediaPreprocessingOptions {
+  enabled: boolean;
+  ffmpegPath: string;
+  chunkDurationSeconds: number;
+  overlapSeconds: number;
+  audioBitrateKbps: number;
+  sampleRateHz: number;
+  channels: number;
+  resumeRetentionHours: number;
+}
 
 export interface MediaMetadata {
   name: string;
   mime: string;
   size: number;
   durationMs?: number;
+  allowEmpty?: boolean;
 }
 
 export interface MediaTranscriptionOptions {
@@ -41,6 +55,8 @@ export interface MediaTranscriptionOptions {
   diarization: boolean;
   maxUploadBytes: number;
   taskTimeoutMs: number;
+  timestampUnit?: TimestampUnit;
+  preprocessing?: MediaPreprocessingOptions;
   visual?: VideoVisualOptions;
 }
 

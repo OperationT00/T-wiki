@@ -80,6 +80,9 @@ export class ParsingFacade {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.store.initialize();
+    await Promise.all(this.registry.list().map(async (parser) => parser.initialize?.()));
+    const sourceHashes = new Map((await this.store.manifests.list()).map((manifest) => [manifest.sourceId, manifest.sourceHash]));
+    await Promise.all(this.registry.list().map(async (parser) => parser.reconcileSources?.(sourceHashes)));
     await ensureFolder(this.adapter, `${this.config.paths.raw}/articles`);
     await ensureFolder(this.adapter, `${this.config.paths.raw}/documents`);
     await ensureFolder(this.adapter, `${this.config.paths.raw}/audio`);
@@ -88,6 +91,10 @@ export class ParsingFacade {
     await this.orchestrator.initialize();
     await this.ingest.initialize();
     this.initialized = true;
+  }
+
+  async cleanupSourceArtifacts(sourceId: string): Promise<void> {
+    await Promise.all(this.registry.list().map(async (parser) => parser.cleanupSource?.(sourceId)));
   }
 
   async importFiles(files: File[]): Promise<SourceManifest[]> {
@@ -150,6 +157,17 @@ export class ParsingFacade {
   async parseSourceWith(sourceId: string, parserId: string): Promise<SourceManifest> {
     await this.initialize();
     return this.orchestrator.parseSource(sourceId, { force: true, parserId });
+  }
+
+  async resumeSourceWith(sourceId: string, parserId: string): Promise<SourceManifest> {
+    await this.initialize();
+    return this.orchestrator.parseSource(sourceId, { resume: true, parserId });
+  }
+
+  async discardMediaResume(sourceId: string): Promise<SourceManifest> {
+    await this.initialize();
+    await this.cleanupSourceArtifacts(sourceId);
+    return this.orchestrator.discardResume(sourceId);
   }
 
   async listSources(): Promise<SourceManifest[]> {

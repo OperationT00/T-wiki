@@ -71,47 +71,31 @@ export class FfmpegFrameExtractor implements VideoFrameExtractor {
     context: ParseContext
   ): Promise<VideoFrameCandidate[]> {
     throwIfAborted(context.signal);
-    const fullPattern = join(options.workingDirectory, "frame-%06d.webp");
-    const thumbPattern = join(options.workingDirectory, "thumb-%06d.webp");
     const sceneFilter = `gt(scene,${options.sceneThreshold.toFixed(4)})`;
-    let result = await this.extractWithFilter(
+    const sceneResult = await this.extractWithFilter(
       sourcePath,
-      fullPattern,
-      thumbPattern,
+      join(options.workingDirectory, "frame-scene-%06d.webp"),
+      join(options.workingDirectory, "thumb-scene-%06d.webp"),
       sceneFilter,
       options,
       context
     );
-    let frames = await listedFrames(options.workingDirectory, "frame-");
-    if (frames.length === 0) {
-      context.reportProgress({ phase: "extracting-frames", mode: "indeterminate", message: "未检测到明显场景变化，按时间间隔提取候选画面" });
-      result = await this.extractWithFilter(
-        sourcePath,
-        fullPattern,
-        thumbPattern,
-        "isnan(prev_selected_t)+gte(t-prev_selected_t,60)",
-        options,
-        context
-      );
-      frames = await listedFrames(options.workingDirectory, "frame-");
-    }
-    const thumbs = await listedFrames(options.workingDirectory, "thumb-");
-    const timestamps = parseCandidateMetadata(result.stderr);
-    const count = Math.min(frames.length, thumbs.length, options.maxCandidates);
-    const output: VideoFrameCandidate[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const timestampMs = Math.max(0, Math.round((timestamps[index]?.timestampSeconds ?? index * 60) * 1000));
-      const quality = timestamps[index];
-      if ((quality?.blackPercent ?? 0) >= 95 || (quality?.blurScore ?? 0) >= 0.65) continue;
-      output.push({
-        frameId: deterministicFrameId(timestampMs),
-        timestampMs,
-        imagePath: join(options.workingDirectory, frames[index]!),
-        thumbnailPath: join(options.workingDirectory, thumbs[index]!),
-        mime: "image/webp"
-      });
-    }
-    return deduplicateTimestampIds(output);
+    context.reportProgress({ phase: "extracting-frames", mode: "indeterminate", message: "正在补充固定间隔候选画面" });
+    const intervalResult = await this.extractWithFilter(
+      sourcePath,
+      join(options.workingDirectory, "frame-interval-%06d.webp"),
+      join(options.workingDirectory, "thumb-interval-%06d.webp"),
+      "isnan(prev_selected_t)+gte(t-prev_selected_t,60)",
+      options,
+      context
+    );
+    const output = [
+      ...await candidatesFromRun(options.workingDirectory, "scene-", sceneResult.stderr, options.maxCandidates),
+      ...await candidatesFromRun(options.workingDirectory, "interval-", intervalResult.stderr, options.maxCandidates)
+    ];
+    return deduplicateTimestampIds(output)
+      .sort((left, right) => left.timestampMs - right.timestampMs)
+      .slice(0, options.maxCandidates);
   }
 
   private async extractWithFilter(
@@ -145,6 +129,9 @@ export class FfmpegFrameExtractor implements VideoFrameExtractor {
   private ffmpegExecutable(): string {
     const configured = this.configuredPath.trim();
     if (!configured) return "ffmpeg";
+    if (isAbsolute(configured) && !extname(configured)) {
+      return join(configured, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+    }
     if (!/^ffmpeg(?:\.exe)?$/i.test(basename(configured))) {
       throw new ParserError("FFMPEG_PATH_INVALID", "FFmpeg 路径必须指向 ffmpeg 或 ffmpeg.exe");
     }
@@ -154,6 +141,9 @@ export class FfmpegFrameExtractor implements VideoFrameExtractor {
   private ffprobeExecutable(): string {
     const configured = this.configuredPath.trim();
     if (!configured) return "ffprobe";
+    if (isAbsolute(configured) && !extname(configured)) {
+      return join(configured, process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
+    }
     if (!/^ffmpeg(?:\.exe)?$/i.test(basename(configured))) {
       throw new ParserError("FFMPEG_PATH_INVALID", "FFmpeg 路径必须指向 ffmpeg 或 ffmpeg.exe");
     }
@@ -161,6 +151,32 @@ export class FfmpegFrameExtractor implements VideoFrameExtractor {
     if (!isAbsolute(configured) && dirname(configured) === ".") return `ffprobe${extension}`;
     return resolve(dirname(configured), `ffprobe${extension}`);
   }
+}
+
+async function candidatesFromRun(
+  directory: string,
+  suffix: string,
+  stderr: string,
+  limit: number
+): Promise<VideoFrameCandidate[]> {
+  const frames = await listedFrames(directory, `frame-${suffix}`);
+  const thumbs = await listedFrames(directory, `thumb-${suffix}`);
+  const timestamps = parseCandidateMetadata(stderr);
+  const count = Math.min(frames.length, thumbs.length, limit);
+  const output: VideoFrameCandidate[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const timestampMs = Math.max(0, Math.round((timestamps[index]?.timestampSeconds ?? index * 60) * 1000));
+    const quality = timestamps[index];
+    if ((quality?.blackPercent ?? 0) >= 95 || (quality?.blurScore ?? 0) >= 0.65) continue;
+    output.push({
+      frameId: deterministicFrameId(timestampMs),
+      timestampMs,
+      imagePath: join(directory, frames[index]!),
+      thumbnailPath: join(directory, thumbs[index]!),
+      mime: "image/webp"
+    });
+  }
+  return output;
 }
 
 export function deterministicFrameId(timestampMs: number): string {

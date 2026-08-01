@@ -4,10 +4,16 @@ All notable changes to T-Wiki are documented in this file.
 
 ## Unreleased
 
+## 0.1.2
+
+- Address Obsidian community-review findings by scoping Vault enumeration, using supported settings and lifecycle APIs, removing browser prompt/confirm calls, and documenting desktop capability boundaries.
+- Generate GitHub artifact attestations for `main.js`, `manifest.json`, and `styles.css` before publishing release assets.
 - Add streamed local audio/video intake with immutable ObjectStore storage.
 - Add public Bilibili caption capture with multi-part and language selection.
 - Add explicit-consent Douyin public-video acquisition through a user-installed yt-dlp, with optional one-task browser-cookie retry.
 - Add explicit-consent remote transcription through OpenAI-compatible and Whisper ASR Webservice protocols.
+- Add FFmpeg audio preprocessing, chunked transcription, normalized timestamps, and resumable media jobs for long recordings.
+- Add scene and periodic key-frame extraction with partial visual-batch recovery.
 - Publish deterministic timestamped transcripts to `raw/audio/` and `raw/videos/` without changing the Ingest workflow.
 - Generate concise media titles from representative transcripts and name new raw documents as `author-id - content-summary` with deterministic fallback.
 

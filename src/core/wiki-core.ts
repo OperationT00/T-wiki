@@ -131,8 +131,19 @@ export const DEFAULT_CONFIG: WikiConfig = {
           language: "auto",
           vadFilter: true,
           diarization: false,
+          timestampUnit: "auto",
           maxUploadBytes: 25 * 1024 * 1024,
           taskTimeoutMs: 3600000,
+          preprocessing: {
+            enabled: true,
+            ffmpegPath: "",
+            chunkDurationSeconds: 900,
+            overlapSeconds: 2,
+            audioBitrateKbps: 64,
+            sampleRateHz: 16000,
+            channels: 1,
+            resumeRetentionHours: 24
+          },
           visual: {
             enabled: false,
             ffmpegPath: "",

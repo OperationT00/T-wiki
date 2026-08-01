@@ -1,4 +1,5 @@
-import { Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { join } from "node:path";
+import { Notice, Plugin, type DataAdapter, type WorkspaceLeaf } from "obsidian";
 
 import {
   normalizePluginSettings,
@@ -28,6 +29,7 @@ import { InMemoryMediaUploadConsent } from "./parsing/parsers/media-transcriptio
 import type { TranscriptionProtocol } from "./parsing/media/transcript-types";
 import { ObsidianHttpClient } from "./services/obsidian-http-client";
 import { SecretStore } from "./services/secret-store";
+import { FileSystemMediaJobStore } from "./services/media-job-store";
 import { WikiService, type MigrationPreview } from "./services/wiki-service";
 import { WorkflowService } from "./services/workflow-service";
 import type { ChatSession, PluginSettings } from "./types";
@@ -60,7 +62,7 @@ export default class LLMWikiPlugin extends Plugin {
     const http = new ObsidianHttpClient();
     const runtimeFactory = new EmbeddedAgentRuntimeFactory(this.secrets, () => this.settings);
     const transcriptTitleGenerator = new AgentTranscriptTitleGenerator(runtimeFactory, () => this.settings);
-    this.wiki = new WikiService(this.app, () => createDefaultParserRegistry({
+    this.wiki = new WikiService(this.app, (config) => createDefaultParserRegistry({
       mineru: {
         http,
         credentials: {
@@ -79,7 +81,8 @@ export default class LLMWikiPlugin extends Plugin {
         visionCredentials: {
           getToken: () => this.secrets.get(VIDEO_VISION_SECRET_ID)
         },
-        titleGenerator: transcriptTitleGenerator
+        titleGenerator: transcriptTitleGenerator,
+        jobs: createMediaJobStore(this.app.vault.adapter, config?.paths.internal ?? ".llm-wiki")
       }
     }));
     this.workflows = new WorkflowService(this.wiki, runtimeFactory, () => this.settings);
@@ -498,6 +501,13 @@ export default class LLMWikiPlugin extends Plugin {
       }
     });
   }
+}
+
+function createMediaJobStore(adapter: DataAdapter, internalRoot: string): FileSystemMediaJobStore | undefined {
+  const basePath = (adapter as DataAdapter & { getBasePath?: () => string }).getBasePath?.();
+  return typeof basePath === "string" && basePath
+    ? new FileSystemMediaJobStore(join(basePath, ...internalRoot.replaceAll("\\", "/").split("/"), "media-jobs"))
+    : undefined;
 }
 
 const DOUYIN_PARSE_PHASES: Readonly<Record<string, DouyinCapturePhase>> = {

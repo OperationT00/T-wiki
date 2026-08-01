@@ -66,8 +66,35 @@ export class ParseOrchestrator {
           && candidate.descriptor.version === attempt.parserVersion
         )
         : undefined;
-      if (attempt?.resumeToken && parser?.descriptor.capabilities.resumable && parser.resume) {
+      if (attempt?.resumeToken
+        && parser?.descriptor.capabilities.resumable
+        && parser.resume
+        && parser.descriptor.resumePolicy !== "user-confirmed") {
         resumable.push(manifest.sourceId);
+        continue;
+      }
+      if (attempt?.resumeToken
+        && parser?.descriptor.capabilities.resumable
+        && parser.resume
+        && parser.descriptor.resumePolicy === "user-confirmed") {
+        await this.manifests.update(manifest.sourceId, manifest.manifestRevision, (current) => {
+          current.parse.status = "parse_failed";
+          current.parse.error = {
+            code: "INTERRUPTED_RESUMABLE",
+            stage: "parse",
+            message: "解析已中断，可在重新确认远程上传后继续",
+            retryable: true,
+            at: new Date().toISOString()
+          };
+          delete current.parse.startedAt;
+          const active = latestActiveAttempt(current);
+          if (active) {
+            active.status = "parse_failed";
+            active.completedAt = new Date().toISOString();
+            active.error = current.parse.error;
+          }
+          return current;
+        });
         continue;
       }
       await this.manifests.update(manifest.sourceId, manifest.manifestRevision, (current) => {
@@ -84,6 +111,17 @@ export class ParseOrchestrator {
       });
     }
     for (const sourceId of resumable) await this.parseSource(sourceId, { resume: true });
+  }
+
+  async discardResume(sourceId: string): Promise<SourceManifest> {
+    const manifest = await this.manifests.read(sourceId);
+    return this.manifests.update(sourceId, manifest.manifestRevision, (current) => {
+      for (const attempt of current.parse.attempts) delete attempt.resumeToken;
+      if (current.parse.error?.code === "INTERRUPTED_RESUMABLE") {
+        current.parse.error = interruptedError("parse");
+      }
+      return current;
+    });
   }
 
   cancel(sourceId: string): boolean {
@@ -230,6 +268,8 @@ export class ParseOrchestrator {
         if (attempt) {
           attempt.status = "parsing";
           attempt.parseKey = parseKey;
+          delete attempt.completedAt;
+          delete attempt.error;
         }
       } else {
         current.parse.attempts.push({
@@ -305,6 +345,8 @@ export class ParseOrchestrator {
       return latestProgress;
     };
     const context: ParseContext = {
+      attemptId,
+      parseKey,
       signal: controller.signal,
       options: Object.freeze({ ...providerConfig.options, timeoutMs: providerTimeout }),
       reportProgress: (progress: ParseProgress) => {
@@ -415,6 +457,7 @@ export class ParseOrchestrator {
             attempt.completedAt = new Date().toISOString();
             attempt.progress = persistedProgress(completedProgress);
             delete attempt.resumeToken;
+            delete attempt.error;
           }
           next.parse.revisions.push({
             revision: revisionNumber,
@@ -544,7 +587,7 @@ function latestResumableAttempt(
   parseKey: string
 ): ParseAttempt | undefined {
   return [...manifest.parse.attempts].reverse().find((attempt) =>
-    attempt.status === "parsing"
+    (attempt.status === "parsing" || attempt.status === "parse_failed")
     && attempt.parserId === parserId
     && attempt.parserVersion === parserVersion
     && attempt.parseKey === parseKey

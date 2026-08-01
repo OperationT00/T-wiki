@@ -5,11 +5,11 @@ import type {
   MediaMetadata,
   MediaTranscriptionOptions,
   TimedTranscript,
-  TimedTranscriptSegment,
   TranscriptionProtocol,
   TranscriptionTransport
 } from "./transcript-types";
 import { parseVideoVisualOptions } from "./video-visual-options";
+import { adaptTranscriptionResponse } from "./transcription-response-adapter";
 
 export interface TranscriptionCredentials {
   getToken(protocol: TranscriptionProtocol): Promise<string>;
@@ -28,6 +28,8 @@ abstract class BaseTransport implements TranscriptionTransport {
   async testConnection(signal: AbortSignal): Promise<{ ok: boolean; message: string }> {
     const source = sourceBodyFromBytes(silentWav());
     const result = await this.transcribe(source, { name: "t-wiki-connection-test.wav", mime: "audio/wav", size: source.size! }, {
+      attemptId: "connection-test",
+      parseKey: "connection-test",
       signal,
       options: {},
       reportProgress() {},
@@ -107,7 +109,13 @@ export class OpenAITranscriptionTransport extends BaseTransport {
       requireToken: !isLoopback(base)
     });
     context.reportProgress({ phase: "transcribing", mode: "indeterminate", message: "正在解析转写结果" });
-    return parseTranscriptResponse(response.json, response.text, this.protocol, this.options.model, true);
+    return adaptTranscriptionResponse(response.json, response.text, {
+      provider: this.protocol,
+      model: this.options.model,
+      generated: true,
+      timestampUnit: this.options.timestampUnit ?? "auto",
+      allowEmpty: metadata.allowEmpty
+    });
   }
 }
 
@@ -136,7 +144,13 @@ export class WhisperAsrTransport extends BaseTransport {
       context,
       requireToken: false
     });
-    return parseTranscriptResponse(response.json, response.text, this.protocol, this.options.model, true);
+    return adaptTranscriptionResponse(response.json, response.text, {
+      provider: this.protocol,
+      model: this.options.model,
+      generated: true,
+      timestampUnit: this.options.timestampUnit ?? "auto",
+      allowEmpty: metadata.allowEmpty
+    });
   }
 }
 
@@ -148,7 +162,32 @@ export function parseMediaTranscriptionOptions(input: Readonly<Record<string, un
   validatedProviderUrl(baseUrl);
   const maxUploadBytes = finite(input.maxUploadBytes, protocol === "openai-transcriptions" ? 25 * 1024 * 1024 : 500 * 1024 * 1024);
   const taskTimeoutMs = finite(input.taskTimeoutMs, 3_600_000);
+  const preprocessingInput = input.preprocessing && typeof input.preprocessing === "object"
+    ? input.preprocessing as Record<string, unknown>
+    : {};
+  const legacyVisual = input.visual && typeof input.visual === "object"
+    ? input.visual as Record<string, unknown>
+    : {};
+  const preprocessing = {
+    enabled: preprocessingInput.enabled !== false,
+    ffmpegPath: String(preprocessingInput.ffmpegPath ?? legacyVisual.ffmpegPath ?? ""),
+    chunkDurationSeconds: finite(preprocessingInput.chunkDurationSeconds, 900),
+    overlapSeconds: finite(preprocessingInput.overlapSeconds, 2),
+    audioBitrateKbps: finite(preprocessingInput.audioBitrateKbps, 64),
+    sampleRateHz: finite(preprocessingInput.sampleRateHz, 16000),
+    channels: finite(preprocessingInput.channels, 1),
+    resumeRetentionHours: finite(preprocessingInput.resumeRetentionHours, 24)
+  };
   if (maxUploadBytes <= 0 || taskTimeoutMs < 1000) throw new ParserError("INVALID_PARSER_OPTIONS", "音视频上传限制或超时配置无效");
+  if (preprocessing.chunkDurationSeconds < 60 || preprocessing.chunkDurationSeconds > 3600
+    || preprocessing.overlapSeconds < 0 || preprocessing.overlapSeconds > 30
+    || preprocessing.overlapSeconds >= preprocessing.chunkDurationSeconds
+    || preprocessing.audioBitrateKbps < 16 || preprocessing.audioBitrateKbps > 320
+    || preprocessing.sampleRateHz < 8000 || preprocessing.sampleRateHz > 48000
+    || preprocessing.channels < 1 || preprocessing.channels > 2
+    || preprocessing.resumeRetentionHours < 1 || preprocessing.resumeRetentionHours > 168) {
+    throw new ParserError("INVALID_MEDIA_PREPROCESSING_OPTIONS", "音视频预处理配置超出允许范围");
+  }
   return {
     protocol,
     baseUrl,
@@ -160,6 +199,10 @@ export function parseMediaTranscriptionOptions(input: Readonly<Record<string, un
     diarization: input.diarization === true,
     maxUploadBytes,
     taskTimeoutMs,
+    timestampUnit: input.timestampUnit === "seconds" || input.timestampUnit === "milliseconds"
+      ? input.timestampUnit
+      : "auto",
+    preprocessing,
     visual: parseVideoVisualOptions(input.visual)
   };
 }
@@ -171,51 +214,6 @@ export function createTranscriptionTransport(
   return options.protocol === "whisper-asr-webservice"
     ? new WhisperAsrTransport(options, credentials)
     : new OpenAITranscriptionTransport(options, credentials);
-}
-
-function parseTranscriptResponse(
-  json: unknown,
-  text: string,
-  provider: string,
-  model: string,
-  generated: boolean
-): TimedTranscript {
-  const record = json && typeof json === "object" ? json as Record<string, unknown> : undefined;
-  const rawSegments = Array.isArray(record?.segments)
-    ? record!.segments
-    : Array.isArray(record?.utterances) ? record!.utterances : [];
-  const segments = rawSegments.flatMap((value): TimedTranscriptSegment[] => {
-    if (!value || typeof value !== "object") return [];
-    const item = value as Record<string, unknown>;
-    const segmentText = String(item.text ?? item.transcript ?? "").trim();
-    if (!segmentText) return [];
-    return [{
-      startMs: secondsToMs(item.start ?? item.start_time),
-      endMs: secondsToMs(item.end ?? item.end_time),
-      text: segmentText,
-      speaker: typeof item.speaker === "string" ? item.speaker : undefined,
-      confidence: typeof item.confidence === "number" ? item.confidence : undefined
-    }];
-  });
-  const plainText = String(record?.text ?? (json === undefined ? text : "")).trim();
-  if (segments.length === 0 && plainText) segments.push({ text: plainText });
-  if (segments.length === 0) throw new ParserError("TRANSCRIPTION_RESULT_INVALID", "转写服务未返回文字内容");
-  return {
-    schemaVersion: 1,
-    language: typeof record?.language === "string" ? record.language : undefined,
-    durationMs: secondsToMs(record?.duration),
-    segments,
-    provider,
-    model,
-    generated,
-    issues: rawSegments.length === 0
-      ? [{ code: "TRANSCRIPT_TIMESTAMPS_MISSING", severity: "warning", message: "服务仅返回纯文本，无法生成精确时间戳" }]
-      : []
-  };
-}
-
-function secondsToMs(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? Math.round(value * 1000) : undefined;
 }
 
 function errorMessage(value: unknown): string | undefined {

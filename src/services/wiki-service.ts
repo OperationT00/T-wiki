@@ -93,7 +93,7 @@ export class WikiService {
 
   constructor(
     private readonly app: App,
-    private readonly parserRegistryFactory?: () => ParserRegistry
+    private readonly parserRegistryFactory?: (config?: WikiConfig) => ParserRegistry
   ) {}
 
   get vault(): Vault {
@@ -462,6 +462,16 @@ export class WikiService {
     return (await this.parsingService()).parseSourceWith(sourceId, parserId);
   }
 
+  async resumeSourceWith(sourceId: string, parserId: string): Promise<SourceManifest> {
+    await this.ensureParsingFrameworkCurrent();
+    return (await this.parsingService()).resumeSourceWith(sourceId, parserId);
+  }
+
+  async discardMediaResume(sourceId: string): Promise<SourceManifest> {
+    await this.ensureParsingFrameworkCurrent();
+    return (await this.parsingService()).discardMediaResume(sourceId);
+  }
+
   async cancelParse(sourceId: string): Promise<boolean> {
     return (await this.parsingService()).cancelParse(sourceId);
   }
@@ -475,7 +485,7 @@ export class WikiService {
     provider: WikiConfig["parsing"]["providers"][string]
   ): Promise<void> {
     await this.ensureParsingFrameworkCurrent();
-    const parser = this.parserRegistryFactory?.().list()
+    const parser = this.parserRegistryFactory?.(await this.loadConfig()).list()
       .find((candidate) => candidate.descriptor.id === providerId);
     parser?.validateOptions(provider.options);
     const current = await this.loadConfig();
@@ -495,7 +505,7 @@ export class WikiService {
 
   async testParserConnection(providerId: string): Promise<{ ok: boolean; message: string }> {
     const config = await this.loadConfig();
-    const parser = this.parserRegistryFactory?.().list()
+    const parser = this.parserRegistryFactory?.(await this.loadConfig()).list()
       .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
     if (!parser?.testConnection) throw new Error(`Parser 不支持连接测试：${providerId}`);
     return parser.testConnection(config.parsing.providers[providerId]?.options ?? {});
@@ -503,7 +513,7 @@ export class WikiService {
 
   async testParserVisualConnection(providerId: string): Promise<{ ok: boolean; message: string }> {
     const config = await this.loadConfig();
-    const parser = this.parserRegistryFactory?.().list()
+    const parser = this.parserRegistryFactory?.(await this.loadConfig()).list()
       .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
     if (!parser?.testVisualConnection) throw new Error(`Parser 不支持视觉连接测试：${providerId}`);
     return parser.testVisualConnection(config.parsing.providers[providerId]?.options ?? {});
@@ -511,7 +521,7 @@ export class WikiService {
 
   async testParserFfmpeg(providerId: string): Promise<{ ok: boolean; message: string }> {
     const config = await this.loadConfig();
-    const parser = this.parserRegistryFactory?.().list()
+    const parser = this.parserRegistryFactory?.(await this.loadConfig()).list()
       .find((candidate) => candidate.descriptor.id === providerId) as (DocumentParserWithConnection | undefined);
     if (!parser?.testFfmpeg) throw new Error(`Parser 不支持 FFmpeg 测试：${providerId}`);
     return parser.testFfmpeg(config.parsing.providers[providerId]?.options ?? {});
@@ -835,6 +845,7 @@ export class WikiService {
       throw error;
     }
     await this.adapter.rmdir(stagingRoot, true).catch(() => undefined);
+    await this.parsing?.cleanupSourceArtifacts(sourceId);
     await this.reindex();
     await this.appendLog("Delete Source", `删除来源 ${manifest.original.name}（${sourceId}），清理 ${moved.length} 个数据文件`);
     await this.recordOperation(deletionOperationId, "delete-source", `删除来源 ${manifest.original.name}`);
@@ -1065,11 +1076,12 @@ export class WikiService {
 
   private async parsingService(): Promise<ParsingFacade> {
     if (this.parsing) return this.parsing;
+    const config = await this.loadConfig();
     this.parsing = new ParsingFacade(
       this.adapter,
-      await this.loadConfig(),
+      config,
       undefined,
-      this.parserRegistryFactory?.(),
+      this.parserRegistryFactory?.(config),
       (path, content) => this.writeVisibleAtomically(path, content)
     );
     await this.parsing.initialize();

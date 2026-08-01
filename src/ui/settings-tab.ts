@@ -33,8 +33,8 @@ export class LLMWikiSettingTab extends PluginSettingTab {
       settingIndex("Obsidian Web Clipper", "Clipper Inbox 路径、启动扫描和手动扫描", ["网页剪藏"]),
       settingIndex("在线视频 / 抖音", "yt-dlp 路径、Cookie 浏览器、下载上限和任务超时", ["Douyin", "在线视频"]),
       settingIndex("文档解析 / MinerU", "MinerU 协议、Base URL、Token、OCR、模型和轮询设置", ["PDF", "OCR"]),
-      settingIndex("音视频解析", "远程转写协议、Base URL、Token、模型、语言、VAD 和说话人分离", ["ASR", "Whisper"]),
-      settingIndex("关键画面", "FFmpeg、场景阈值、视觉 API、视觉模型和截图数量", ["Vision", "视频截图"])
+      settingIndex("音视频解析", "远程转写、FFmpeg 预处理、分片、断点恢复和时间戳兼容", ["ASR", "Whisper", "大文件"]),
+      settingIndex("关键画面", "场景与周期抽帧、视觉 API、视觉模型和截图数量", ["Vision", "视频截图"])
     ];
   }
 
@@ -552,12 +552,16 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     };
     const draft: ParserProviderConfig = structuredClone(current);
     const options = draft.options;
+    const preprocessing = options.preprocessing && typeof options.preprocessing === "object" && !Array.isArray(options.preprocessing)
+      ? options.preprocessing as Record<string, unknown>
+      : (options.preprocessing = {}) as Record<string, unknown>;
     const visual = options.visual && typeof options.visual === "object" && !Array.isArray(options.visual)
       ? options.visual as Record<string, unknown>
       : (options.visual = {}) as Record<string, unknown>;
     const vision = visual.vision && typeof visual.vision === "object" && !Array.isArray(visual.vision)
       ? visual.vision as Record<string, unknown>
       : (visual.vision = {}) as Record<string, unknown>;
+    if (preprocessing.ffmpegPath === undefined) preprocessing.ffmpegPath = visual.ffmpegPath ?? "";
     type Protocol = "openai-transcriptions" | "whisper-asr-webservice";
     let tokenDraft = "";
     let visionTokenDraft = "";
@@ -614,9 +618,45 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     new Setting(this.containerEl).setName("最大上传（MiB）").addText((text) => text
       .setValue(String(Math.round(Number(options.maxUploadBytes ?? 25 * 1024 * 1024) / 1024 / 1024)))
       .onChange((value) => { options.maxUploadBytes = boundedInteger(value, 25, 1, 500) * 1024 * 1024; }));
+    new Setting(this.containerEl).setName("稳定转写").setHeading();
+    this.containerEl.createEl("p", {
+      text: "FFmpeg 会先提取 16 kHz 单声道音频，再按分片顺序上传。已完成分片可在中断后继续，避免大文件从头重传。",
+      cls: "llm-wiki-muted"
+    });
+    new Setting(this.containerEl)
+      .setName("启用媒体预处理")
+      .setDesc("推荐开启。FFmpeg 不可用时，小型兼容文件仍可回退为整文件上传。")
+      .addToggle((toggle) => toggle
+        .setValue(preprocessing.enabled !== false)
+        .onChange((value) => { preprocessing.enabled = value; }));
+    new Setting(this.containerEl)
+      .setName("FFmpeg 路径")
+      .setDesc("媒体预处理与关键画面共用。留空时从 PATH 查找；FFprobe 应位于同目录或 PATH。")
+      .addText((text) => text.setPlaceholder("例如 D:\\ffmpeg\\bin\\ffmpeg.exe")
+        .setValue(String(preprocessing.ffmpegPath ?? ""))
+        .onChange((value) => {
+          preprocessing.ffmpegPath = value.trim();
+          visual.ffmpegPath = value.trim();
+        }));
+    new Setting(this.containerEl).setName("分片时长（分钟）").setDesc("默认 15 分钟，按顺序逐片转写。")
+      .addText((text) => text.setValue(String(Math.round(Number(preprocessing.chunkDurationSeconds ?? 900) / 60)))
+        .onChange((value) => { preprocessing.chunkDurationSeconds = boundedInteger(value, 15, 1, 60) * 60; }));
+    new Setting(this.containerEl).setName("分片重叠（秒）").setDesc("用于避免切点丢词，合并时会消除重复。")
+      .addText((text) => text.setValue(String(preprocessing.overlapSeconds ?? 2))
+        .onChange((value) => { preprocessing.overlapSeconds = boundedInteger(value, 2, 0, 30); }));
+    new Setting(this.containerEl).setName("断点保留（小时）")
+      .addText((text) => text.setValue(String(preprocessing.resumeRetentionHours ?? 24))
+        .onChange((value) => { preprocessing.resumeRetentionHours = boundedInteger(value, 24, 1, 168); }));
+    new Setting(this.containerEl).setName("时间戳单位").setDesc("Auto 会兼容秒、毫秒及常见供应商包装格式。")
+      .addDropdown((dropdown) => dropdown
+        .addOption("auto", "Auto")
+        .addOption("seconds", "秒")
+        .addOption("milliseconds", "毫秒")
+        .setValue(String(options.timestampUnit ?? "auto"))
+        .onChange((value) => { options.timestampUnit = value; }));
     new Setting(this.containerEl).setName("关键画面").setHeading();
     this.containerEl.createEl("p", {
-      text: "仅本地视频使用。FFmpeg 在本机抽取候选帧；远程视觉服务只接收最长边 512px 的缩略图和前后 30 秒文字。视觉失败会发布纯文字稿。",
+      text: "视频来源会在本机抽取场景帧和周期帧；远程视觉服务只接收最长边 512px 的缩略图和前后 30 秒文字。单批失败不会丢弃其他成功画面。",
       cls: "llm-wiki-muted"
     });
     new Setting(this.containerEl)
@@ -630,12 +670,6 @@ export class LLMWikiSettingTab extends PluginSettingTab {
             transcriptionToggle?.setValue(true);
           }
         }));
-    new Setting(this.containerEl)
-      .setName("FFmpeg 路径")
-      .setDesc("留空时从 PATH 查找；也可填写 ffmpeg 或 ffmpeg.exe 的绝对路径。FFprobe 应位于同目录或 PATH。")
-      .addText((text) => text.setPlaceholder("例如 D:\\ffmpeg\\bin\\ffmpeg.exe")
-        .setValue(String(visual.ffmpegPath ?? ""))
-        .onChange((value) => { visual.ffmpegPath = value.trim(); }));
     new Setting(this.containerEl).setName("场景阈值").setDesc("0–1，越低候选越多。")
       .addText((text) => text.setValue(String(visual.sceneThreshold ?? 0.32))
         .onChange((value) => {

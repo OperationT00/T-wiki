@@ -12,18 +12,31 @@ Bilibili URL / 抖音 URL / 本地音视频
   -> raw/audio 或 raw/videos
 ```
 
-本地视频以及抖音下载后的本地原件，在 `media-transcription@1.1.1` 中可以继续执行可选的图文流水线：
+本地媒体以及抖音下载后的本地原件，由 `media-transcription@1.3.0` 执行稳定转写流水线：
+
+```text
+原始音视频
+  -> FFmpeg 提取 16 kHz 单声道 MP3
+  -> 15 分钟分片（2 秒重叠）
+  -> 分片顺序上传与规范化响应
+  -> 断点记录、时间偏移和边界去重
+  -> 完整性校验
+```
+
+成功分片和规范化结果临时保存在 `.llm-wiki/media-jobs/`。成功发布后立即清理；中断任务默认保留 24 小时，恢复前必须再次确认远程上传。原始媒体仍保存在 ObjectStore，不会随任务缓存删除。
+
+视频随后可以继续执行可选的图文流水线：
 
 ```text
 TimedTranscript
-  -> 本机 FFprobe / FFmpeg 场景抽帧
+  -> 本机 FFprobe / FFmpeg 场景抽帧 + 周期抽帧
   -> 黑屏、模糊、重复与过密候选过滤
   -> OpenAI-compatible Vision（512px 缩略图 + 前后 30 秒文字）
   -> MediaTimelineComposer
   -> raw/videos/*.md + raw/assets/<sourceId>/*.webp
 ```
 
-视觉模型只判断画面是否值得保留，并生成客观标题与描述；知识总结仍由 Ingest 完成。默认每小时最多保留 16 张、单视频最多 64 张。视觉服务、FFmpeg 或画面筛选失败时，Parser 发布纯文字稿并写入 `VIDEO_VISUAL_SKIPPED` warning。
+视觉模型只判断画面是否值得保留，并生成客观标题与描述；知识总结仍由 Ingest 完成。默认每小时最多保留 16 张、单视频最多 64 张。单个视觉批次失败时保留其他批次的截图并写入 `VIDEO_VISUAL_PARTIAL`；全部失败才降级为纯文字稿。
 
 ## 安全边界
 

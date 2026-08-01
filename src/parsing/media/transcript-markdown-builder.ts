@@ -29,7 +29,7 @@ export class TranscriptMarkdownBuilder {
   build(transcript: TimedTranscript, options: TranscriptMarkdownOptions = {}): TranscriptMarkdownResult {
     const normalized = normalizeSegments(transcript.segments);
     if (normalized.length === 0) throw new ParserError("EMPTY_TRANSCRIPT", "转写结果为空");
-    assertTimeline(normalized);
+    assertTimeline(normalized, transcript.durationMs);
     const paragraphs = aggregateSegments(normalized);
     const frameGroups = alignFrames(paragraphs, options.visualFrames ?? []);
     const hasTimeline = paragraphs.some((paragraph) => paragraph.startMs !== undefined);
@@ -46,6 +46,9 @@ export class TranscriptMarkdownBuilder {
         "",
         ...paragraphs.flatMap((paragraph) => [paragraph.text, ""])
       ];
+    const precisionNotice = transcript.timePrecision === "chunk"
+      ? ["> 时间位置由音频分片近似推算，不代表句级精确时间戳。", ""]
+      : [];
     const appendix = frameGroups.unaligned.length > 0
       ? ["## 关键画面", "", ...frameGroups.unaligned.flatMap(renderFrame)]
       : [];
@@ -54,6 +57,7 @@ export class TranscriptMarkdownBuilder {
       "",
       "## 文字稿",
       "",
+      ...precisionNotice,
       ...transcriptContent,
       ...appendix
     ].join("\n").trimEnd() + "\n";
@@ -90,6 +94,7 @@ export class TranscriptMarkdownBuilder {
         transcript_provider: transcript.provider,
         transcript_model: transcript.model,
         transcript_generated: String(transcript.generated),
+        transcript_time_precision: transcript.timePrecision ?? (hasTimeline ? "segment" : "none"),
         duration_ms: transcript.durationMs === undefined ? undefined : String(transcript.durationMs),
         visual_extractor: options.visualMetadata?.extractor,
         ffmpeg_version: options.visualMetadata?.ffmpegVersion,
@@ -237,7 +242,7 @@ function isSentenceEnding(text: string): boolean {
   return /[。！？!?；;][”’」』】)\]]?$/u.test(text);
 }
 
-function assertTimeline(segments: TimedTranscriptSegment[]): void {
+function assertTimeline(segments: TimedTranscriptSegment[], durationMs: number | undefined): void {
   let previous = -1;
   for (const segment of segments) {
     if (segment.text.includes("\uFFFD")) throw new ParserError("TRANSCRIPT_ENCODING_INVALID", "文字稿包含乱码替换字符");
@@ -249,6 +254,10 @@ function assertTimeline(segments: TimedTranscriptSegment[]): void {
     }
     if (segment.endMs !== undefined && segment.startMs !== undefined && segment.endMs < segment.startMs) {
       throw new ParserError("TRANSCRIPT_TIMELINE_INVALID", "文字稿结束时间早于开始时间");
+    }
+    if (durationMs !== undefined
+      && ((segment.startMs ?? 0) > durationMs + 1000 || (segment.endMs ?? 0) > durationMs + 1000)) {
+      throw new ParserError("TRANSCRIPTION_TIMELINE_OUT_OF_RANGE", "文字稿时间戳超出媒体时长");
     }
   }
 }
