@@ -3,6 +3,7 @@ import type { ParseIssue } from "../../types";
 import type { VideoVisualOptions } from "./video-visual-types";
 
 export interface TimedTranscriptSegment {
+  segmentId?: string;
   startMs?: number;
   endMs?: number;
   text: string;
@@ -36,6 +37,10 @@ export interface MediaPreprocessingOptions {
   resumeRetentionHours: number;
 }
 
+export interface TranscriptFormattingOptions {
+  mode: "deterministic" | "constrained-llm";
+}
+
 export interface MediaMetadata {
   name: string;
   mime: string;
@@ -57,6 +62,7 @@ export interface MediaTranscriptionOptions {
   taskTimeoutMs: number;
   timestampUnit?: TimestampUnit;
   preprocessing?: MediaPreprocessingOptions;
+  formatting?: TranscriptFormattingOptions;
   visual?: VideoVisualOptions;
 }
 

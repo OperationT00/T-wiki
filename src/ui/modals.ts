@@ -343,13 +343,26 @@ export class UrlCaptureModal extends Modal {
             const provider = config.parsing.providers["media-transcription"];
             if (!provider?.enabled) throw new Error("请先在设置中启用音视频远程转写");
             const options = provider.options;
+            const formatting = options.formatting && typeof options.formatting === "object"
+              ? options.formatting as Record<string, unknown>
+              : {};
+            const fastModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
+              ?? this.plugin.settings.agent.models[0];
+            const formattingLines = formatting.mode === "constrained-llm"
+              ? [
+                `文字稿整理：约束式 Fast 模型（${fastModel?.id ?? "未配置 fast 模型"}）`,
+                `Agent 服务：${this.plugin.settings.agent.baseUrl}`,
+                "完整文字稿会分批发送给 Agent API，并由宿主执行字符守恒校验。"
+              ]
+              : ["文字稿整理：纯本地规则，不会额外发送完整文字稿。"];
             const confirmed = await confirmAction(this.plugin.app, "确认远程转写", [
               `来源：${url}`,
               `协议：${String(options.protocol ?? "openai-transcriptions")}`,
               `服务：${String(options.baseUrl ?? "")}`,
               `模型：${String(options.model ?? "")}`,
+              ...formattingLines,
               "",
-              "将先下载该分 P 的公开音轨，再把音轨发送给上述远程服务。是否仅授权本次操作？"
+              "将先下载该分 P 的公开音轨，再把音轨发送给上述远程服务。是否仅授权本次转写与文字稿整理？"
             ].join("\n"), "确认并转写", true);
             if (!confirmed) return;
             directButton?.setDisabled(true);
@@ -400,6 +413,18 @@ export class UrlCaptureModal extends Modal {
       const vision = visual.vision && typeof visual.vision === "object"
         ? visual.vision as Record<string, unknown>
         : {};
+      const formatting = options.formatting && typeof options.formatting === "object"
+        ? options.formatting as Record<string, unknown>
+        : {};
+      const fastModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
+        ?? this.plugin.settings.agent.models[0];
+      const formattingLines = formatting.mode === "constrained-llm"
+        ? [
+          `文字稿整理：约束式 Fast 模型（${fastModel?.id ?? "未配置 fast 模型"}）`,
+          `Agent 服务：${this.plugin.settings.agent.baseUrl}`,
+          "完整文字稿会分批发送给 Agent API，并由宿主执行字符守恒校验。"
+        ]
+        : ["文字稿整理：纯本地规则，不会额外发送完整文字稿。"];
       directButton?.setDisabled(true);
       browserButton?.setDisabled(true);
       transcribeButton?.setDisabled(true);
@@ -410,12 +435,13 @@ export class UrlCaptureModal extends Modal {
         "",
         `ASR 服务：${String(options.baseUrl ?? "")}`,
         `ASR 模型：${String(options.model ?? "")}`,
+        ...formattingLines,
         ...(visual.enabled === true ? [
           `视觉服务：${String(vision.baseUrl ?? "")}`,
           `视觉模型：${String(vision.model ?? "")}`
         ] : ["关键画面：未启用，将生成纯文字稿"]),
         "",
-        "将下载完整公开视频并发送给 ASR；启用关键画面时还会发送缩略图及相邻文字。默认不会读取浏览器 Cookie。是否仅授权本次操作？"
+        "将下载完整公开视频并发送给 ASR；约束式整理会发送完整文字稿；启用关键画面时还会发送缩略图及相邻文字。默认不会读取浏览器 Cookie。是否仅授权本次操作？"
       ].join("\n"), "确认并解析", true);
       if (!confirmed) {
         status.setText("已取消本次抖音解析，未下载或上传视频");
@@ -434,6 +460,7 @@ export class UrlCaptureModal extends Modal {
           storing: "正在校验并保存视频原件…",
           uploading: "正在上传音视频到转写服务…",
           transcribing: "正在进行语音转写…",
+          "formatting-transcript": "正在恢复文字稿标点和自然段…",
           "reading-media-info": "正在读取视频媒体信息…",
           "extracting-frames": "正在提取关键帧候选…",
           "filtering-frames": "正在本地筛选关键帧…",
@@ -762,6 +789,15 @@ function renderKnowledgeDecision(container: HTMLElement, decision: KnowledgeDeci
     text: `Evidence: ${decision.evidence.map(formatCoverageEvidence).join(", ")}`,
     cls: "llm-wiki-muted"
   });
+  for (const claim of decision.evidenceClaims ?? []) {
+    const evidence = card.createEl("blockquote", { cls: "llm-wiki-evidence-claim" });
+    evidence.createEl("strong", { text: `结论：${claim.claim}` });
+    evidence.createEl("p", { text: `原文引句：“${claim.supportingQuote}”` });
+    evidence.createEl("small", {
+      text: `关系：${claim.relation} · ${formatCoverageEvidence(claim.evidence)}`,
+      cls: "llm-wiki-muted"
+    });
+  }
 }
 
 function formatCoverageEvidence(value: KnowledgeDecision["evidence"][number]): string {

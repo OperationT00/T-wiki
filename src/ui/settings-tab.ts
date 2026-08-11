@@ -32,6 +32,7 @@ export class LLMWikiSettingTab extends PluginSettingTab {
       settingIndex("Agent Loop 预算", "轮数、工具调用、页面变更、Token 和总耗时限制", ["budget"]),
       settingIndex("Obsidian Web Clipper", "Clipper Inbox 路径、启动扫描和手动扫描", ["网页剪藏"]),
       settingIndex("在线视频 / 抖音", "yt-dlp 路径、Cookie 浏览器、下载上限和任务超时", ["Douyin", "在线视频"]),
+      settingIndex("解析任务", "同时解析的文件数量和排队行为", ["并发", "队列"]),
       settingIndex("文档解析 / MinerU", "MinerU 协议、Base URL、Token、OCR、模型和轮询设置", ["PDF", "OCR"]),
       settingIndex("音视频解析", "远程转写、FFmpeg 预处理、分片、断点恢复和时间戳兼容", ["ASR", "Whisper", "大文件"]),
       settingIndex("关键画面", "场景与周期抽帧、视觉 API、视觉模型和截图数量", ["Vision", "视频截图"])
@@ -57,10 +58,46 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     this.renderWebClipper();
     this.renderOnlineVideo();
     void (async () => {
+      await this.renderParsingConcurrency();
       await this.renderMinerU();
       await this.renderMediaTranscription();
     })();
 
+  }
+
+  private async renderParsingConcurrency(): Promise<void> {
+    new Setting(this.containerEl).setName("解析任务").setHeading();
+    if (!(await this.plugin.wiki.isInitialized())) {
+      this.containerEl.createEl("p", { text: "初始化 T-Wiki 后可配置解析并发。" });
+      return;
+    }
+    const config = await this.plugin.wiki.loadConfig();
+    let value = config.parsing.maxConcurrentTasks;
+    new Setting(this.containerEl)
+      .setName("同时解析数量")
+      .setDesc("同一时间运行的解析任务数，超出的文件会排队。建议普通文档设为 3；大量 PDF 或音视频可设为 2。")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "1";
+        text.inputEl.max = "8";
+        text.inputEl.step = "1";
+        text.setValue(String(value)).onChange((next) => {
+          value = boundedInteger(next, config.parsing.maxConcurrentTasks, 1, 8);
+        });
+      })
+      .addButton((button) => button.setButtonText("保存").onClick(async () => {
+        button.setDisabled(true);
+        try {
+          await this.plugin.wiki.updateParsingConcurrency(value);
+          button.setButtonText("已保存");
+          new Notice(`解析并发数已设置为 ${value}`);
+        } catch (error) {
+          button.setButtonText("保存失败");
+          new Notice(error instanceof Error ? error.message : String(error));
+        } finally {
+          button.setDisabled(false);
+        }
+      }));
   }
 
   private renderAgentSettings(): void {
@@ -555,6 +592,9 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     const preprocessing = options.preprocessing && typeof options.preprocessing === "object" && !Array.isArray(options.preprocessing)
       ? options.preprocessing as Record<string, unknown>
       : (options.preprocessing = {}) as Record<string, unknown>;
+    const formatting = options.formatting && typeof options.formatting === "object" && !Array.isArray(options.formatting)
+      ? options.formatting as Record<string, unknown>
+      : (options.formatting = {}) as Record<string, unknown>;
     const visual = options.visual && typeof options.visual === "object" && !Array.isArray(options.visual)
       ? options.visual as Record<string, unknown>
       : (options.visual = {}) as Record<string, unknown>;
@@ -654,6 +694,19 @@ export class LLMWikiSettingTab extends PluginSettingTab {
         .addOption("milliseconds", "毫秒")
         .setValue(String(options.timestampUnit ?? "auto"))
         .onChange((value) => { options.timestampUnit = value; }));
+    new Setting(this.containerEl).setName("文字稿质量").setHeading();
+    this.containerEl.createEl("p", {
+      text: "本地规则会修复分片重叠、超长句和段落边界。约束式 Fast 模型只允许增加标点、调整空格和合并连续 Segment；字符、数字、术语或顺序发生变化时会自动回退。",
+      cls: "llm-wiki-muted"
+    });
+    new Setting(this.containerEl)
+      .setName("文字稿整理")
+      .setDesc("约束式 Fast 模型会把完整文字稿发送到 Agent Runtime 所配置的 API；纯本地规则不会额外发送文字稿。")
+      .addDropdown((dropdown) => dropdown
+        .addOption("deterministic", "纯本地规则")
+        .addOption("constrained-llm", "约束式 Fast 模型")
+        .setValue(formatting.mode === "constrained-llm" ? "constrained-llm" : "deterministic")
+        .onChange((value) => { formatting.mode = value; }));
     new Setting(this.containerEl).setName("关键画面").setHeading();
     this.containerEl.createEl("p", {
       text: "视频来源会在本机抽取场景帧和周期帧；远程视觉服务只接收最长边 512px 的缩略图和前后 30 秒文字。单批失败不会丢弃其他成功画面。",

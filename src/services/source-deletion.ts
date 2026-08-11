@@ -18,7 +18,7 @@ export function validateSourceDeletionChain(
         conflicts.push({ path: change.path, reason: "Wiki 页面已被后续操作修改" });
         continue;
       }
-      simulated.set(change.path, change.before === null ? undefined : change.before);
+      simulated.set(change.path, change.before == null ? undefined : change.before);
     }
   }
   return conflicts;

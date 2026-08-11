@@ -111,7 +111,9 @@ export function createWikiToolRegistry(host: WikiAgentHost): ToolRegistry {
     if (!revision || revision.contentHash !== input.contentHash) throw new Error("raw contentHash 已变化");
     const section = markdownSections(verified.content).find((item) => item.sectionId === input.sectionId);
     if (!section) throw new Error(`raw section 不存在：${input.sectionId}`);
-    const evidenceId = context.evidenceLedger.recordRaw(input.sourceId, revision.contentHash, section.sectionId);
+    const evidenceId = context.evidenceLedger.recordRaw(
+      input.sourceId, revision.contentHash, section.sectionId, section.content
+    );
     return result({
       sourceId: input.sourceId,
       contentHash: revision.contentHash,
@@ -238,7 +240,7 @@ export function createWikiToolRegistry(host: WikiAgentHost): ToolRegistry {
         return result({ path: page.path, hash, mode, sectionId: section.sectionId, alreadyRead: true }, `Skipped duplicate ${page.path}#${section.sectionId}`);
       }
       context.queryReadKeys?.add(readKey);
-      const evidenceId = context.evidenceLedger.recordWiki(page.path, hash);
+      const evidenceId = context.evidenceLedger.recordWiki(page.path, hash, section.content);
       recordQueryRead(context, page.path, hash, "section", section.sectionId);
       return result({
         path: page.path, hash, type: page.type, evidenceEligible: true, evidenceId, sectionId: section.sectionId,
@@ -250,7 +252,7 @@ export function createWikiToolRegistry(host: WikiAgentHost): ToolRegistry {
       return result({ path: page.path, hash, mode, alreadyRead: true }, `Skipped duplicate full read ${page.path}`);
     }
     context.queryReadKeys?.add(readKey);
-    const evidenceId = context.evidenceLedger.recordWiki(page.path, hash);
+    const evidenceId = context.evidenceLedger.recordWiki(page.path, hash, page.content);
     recordQueryRead(context, page.path, hash, "full");
     return result({
       path: page.path, hash, type: page.type, evidenceEligible: true, evidenceId,

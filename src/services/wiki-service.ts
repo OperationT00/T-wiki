@@ -4,7 +4,6 @@ import {
   canonicalizePage,
   DEFAULT_CONFIG,
   EMPTY_STATE,
-  generateIndex,
   isoDate,
   lintWiki,
   normalizeVaultPath,
@@ -17,8 +16,11 @@ import {
 import { mergeConfig } from "../core/wiki-config";
 import {
   buildNavigationIndex,
+  indexCardFromPage,
   indexPage,
   isNavigationIndex,
+  patchNavigationIndex,
+  renderVisibleNavigationIndex,
   renderRootIndexForPrompt,
   rootIndexView,
   type WikiNavigationIndex
@@ -49,19 +51,32 @@ import type {
 import type { ParseProgressListener } from "../parsing/parse-progress";
 import { ParsingFacade } from "./parsing-service";
 import { validateSourceDeletionChain } from "./source-deletion";
+import { ContentSnapshotStore } from "./content-snapshot-store";
+import { PendingPlanStore } from "./pending-plan-store";
+import { classifyTransactionFile } from "./transaction-recovery";
 import {
   atomicReplaceText,
   normalizeManifest,
   SourceStore
 } from "./source-store";
 
+interface TransactionEntry {
+  path: string;
+  action: "create" | "update";
+  beforeHash: string | null;
+  beforeSnapshot?: string;
+  afterHash: string | null;
+}
+
 interface TransactionJournal {
+  version?: 1 | 2;
   id: string;
   status: "prepared" | "applying";
   createdAt: string;
   kind?: "apply" | "rollback";
   plan?: WikiChangePlan;
   originals: Record<string, string | null>;
+  entries?: TransactionEntry[];
   receiptPath?: string;
   receiptBefore?: RollbackReceipt;
 }
@@ -90,6 +105,8 @@ export class WikiService {
   private legacyRawState: Record<string, RawRecord> | null = null;
   private navigationIndex: WikiNavigationIndex | null = null;
   private navigationIndexDirty = false;
+  private readonly dirtyWikiPaths = new Set<string>();
+  private logWriteTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly app: App,
@@ -102,6 +119,16 @@ export class WikiService {
 
   get adapter(): DataAdapter {
     return this.vault.adapter;
+  }
+
+  private async snapshotStore(): Promise<ContentSnapshotStore> {
+    const config = await this.loadConfig();
+    return new ContentSnapshotStore(this.adapter, config.paths.internal);
+  }
+
+  async pendingPlanStore(): Promise<PendingPlanStore> {
+    const config = await this.loadConfig();
+    return new PendingPlanStore(this.adapter, `${config.paths.internal}/pending-plan.json`);
   }
 
   async isInitialized(): Promise<boolean> {
@@ -320,12 +347,33 @@ export class WikiService {
     return lintWiki(pages, config, paths);
   }
 
-  async reindex(): Promise<void> {
+  async reindex(changedPaths?: string[]): Promise<void> {
     const config = await this.loadConfig();
-    const pages = await this.readPages();
     const fingerprint = this.wikiFingerprint(config);
-    const navigation = buildNavigationIndex(pages, fingerprint);
-    await this.writeVisible(config.paths.index, generateIndex(pages, config));
+    let navigation: WikiNavigationIndex | null = null;
+    const normalizedChanges = [...new Set((changedPaths ?? []).map(normalizeVaultPath))]
+      .filter((path) => path.startsWith(`${normalizeVaultPath(config.paths.wiki).replace(/\/$/, "")}/`));
+    if (normalizedChanges.length > 0) {
+      const base = await this.readStoredNavigationIndex();
+      if (base) {
+        const updates = new Map<string, ReturnType<typeof indexCardFromPage> | null>();
+        for (const path of normalizedChanges) {
+          const file = this.vault.getAbstractFileByPath(path);
+          if (!(file instanceof TFile)) {
+            updates.set(path, null);
+            continue;
+          }
+          const parsed = parseMarkdown(path, await this.vault.cachedRead(file));
+          updates.set(path, parsed ? indexCardFromPage(parsed) : null);
+        }
+        navigation = patchNavigationIndex(base, updates, fingerprint);
+      }
+    }
+    if (!navigation) navigation = buildNavigationIndex(await this.readPages(), fingerprint);
+    await this.writeVisible(
+      config.paths.index,
+      renderVisibleNavigationIndex(navigation, config.name, config.domain, isoDate())
+    );
     await atomicReplaceText(
       this.adapter,
       `${config.paths.internal}/retrieval/navigation-index-v1.json`,
@@ -333,12 +381,14 @@ export class WikiService {
     );
     this.navigationIndex = navigation;
     this.navigationIndexDirty = false;
+    this.dirtyWikiPaths.clear();
   }
 
   markNavigationIndexDirty(path?: string): void {
     if (path && this.config) {
       const prefix = `${normalizeVaultPath(this.config.paths.wiki).replace(/\/$/, "")}/`;
       if (!normalizeVaultPath(path).startsWith(prefix)) return;
+      this.dirtyWikiPaths.add(normalizeVaultPath(path));
     }
     this.navigationIndexDirty = true;
   }
@@ -359,8 +409,20 @@ export class WikiService {
         // Derived indexes are rebuilt below when unreadable.
       }
     }
-    await this.reindex();
+    await this.reindex([...this.dirtyWikiPaths]);
     return this.navigationIndex!;
+  }
+
+  private async readStoredNavigationIndex(): Promise<WikiNavigationIndex | null> {
+    const config = await this.loadConfig();
+    const path = `${config.paths.internal}/retrieval/navigation-index-v1.json`;
+    if (!(await this.adapter.exists(path))) return null;
+    try {
+      const value: unknown = JSON.parse(await this.adapter.read(path));
+      return isNavigationIndex(value) ? value : null;
+    } catch {
+      return null;
+    }
   }
 
   async navigationRootPrompt(): Promise<string> {
@@ -500,6 +562,27 @@ export class WikiService {
     });
     await atomicReplaceText(this.adapter, "llm-wiki.config.json", `${JSON.stringify(next, null, 2)}\n`);
     this.config = next;
+    this.parsing?.dispose();
+    this.parsing = null;
+  }
+
+  async updateParsingConcurrency(maxConcurrentTasks: number): Promise<void> {
+    await this.ensureParsingFrameworkCurrent();
+    if (!Number.isInteger(maxConcurrentTasks) || maxConcurrentTasks < 1 || maxConcurrentTasks > 8) {
+      throw new Error("解析并发数必须是 1–8 的整数");
+    }
+    const parsing = this.parsing;
+    const active = parsing?.hasActiveTasks()
+      || (await this.listSources()).some((source) => source.parse.status === "parsing");
+    if (active) throw new Error("存在运行中或排队中的解析任务，请等待完成后再修改并发数");
+    const current = await this.loadConfig();
+    const next = mergeConfig({
+      ...current,
+      parsing: { ...current.parsing, maxConcurrentTasks }
+    });
+    await atomicReplaceText(this.adapter, "llm-wiki.config.json", `${JSON.stringify(next, null, 2)}\n`);
+    this.config = next;
+    parsing?.dispose();
     this.parsing = null;
   }
 
@@ -579,24 +662,34 @@ export class WikiService {
 
   async applyPlan(input: unknown): Promise<WikiChangePlan> {
     const plan = validateChangePlan(input, await this.currentHashes());
+    const snapshots = await this.snapshotStore();
     const journal: TransactionJournal = {
+      version: 2,
       id: plan.operationId,
       status: "prepared",
       createdAt: new Date().toISOString(),
       kind: "apply",
       plan,
-      originals: {}
+      originals: {},
+      entries: []
     };
     for (const operation of plan.operations) {
       const file = this.vault.getAbstractFileByPath(operation.path);
-      journal.originals[operation.path] = file instanceof TFile ? await this.vault.read(file) : null;
+      const before = file instanceof TFile ? await this.vault.read(file) : null;
+      journal.entries!.push({
+        path: operation.path,
+        action: operation.action,
+        beforeHash: before === null ? null : sha256(before),
+        ...(before === null ? {} : { beforeSnapshot: await snapshots.put(before) }),
+        afterHash: sha256(operation.content)
+      });
     }
     const journalPath = await this.transactionJournalPath(plan.operationId);
     const receiptPath = await this.rollbackReceiptPath(plan.operationId);
     journal.receiptPath = receiptPath;
-    await this.writeInternalJson(journalPath, journal);
+    await this.writeTransactionJournal(journalPath, journal);
     journal.status = "applying";
-    await this.writeInternalJson(journalPath, journal);
+    await this.writeTransactionJournal(journalPath, journal);
     try {
       for (const operation of plan.operations) {
         await ensureVisibleParent(this.vault, operation.path);
@@ -609,34 +702,35 @@ export class WikiService {
           await this.vault.modify(file, operation.content);
         }
       }
-      await this.reindex();
+      await this.reindex(plan.operations.map((operation) => operation.path));
       const lint = await this.runLint();
       const errors = lint.issues.filter((issue) => issue.severity === "error").length;
       const receipt: RollbackReceipt = {
-        version: 1,
+        version: 2,
         operationId: plan.operationId,
         status: "applied",
         summary: plan.summary,
         appliedAt: new Date().toISOString(),
         sourceIds: [...new Set(plan.ingestCoverage?.sources.map((source) => source.sourceId) ?? [])],
-        changes: plan.operations.map((operation) => ({
-          path: operation.path,
-          originalAction: operation.action,
-          rollbackAction: journal.originals[operation.path] === null ? "delete" : "restore",
-          before: journal.originals[operation.path] ?? null,
-          afterHash: sha256(operation.content)
+        changes: journal.entries!.map((entry) => ({
+          path: entry.path,
+          originalAction: entry.action,
+          rollbackAction: entry.beforeHash === null ? "delete" : "restore",
+          beforeHash: entry.beforeHash,
+          ...(entry.beforeSnapshot ? { beforeSnapshot: entry.beforeSnapshot } : {}),
+          afterHash: entry.afterHash!
         }))
       };
       await this.writeInternalJson(receiptPath, receipt);
       await this.appendLog("Apply", `${plan.summary}（${plan.operations.length} 个文件，Lint ${errors} 个错误）`);
       await this.recordOperation(plan.operationId, "apply", plan.summary);
-      await this.adapter.remove(journalPath);
+      await this.removeTransactionJournal(journalPath);
       return plan;
     } catch (error) {
       await this.rollbackJournal(journal);
-      await this.reindex().catch(() => undefined);
+      await this.reindex(plan.operations.map((operation) => operation.path)).catch(() => undefined);
       if (await this.adapter.exists(receiptPath)) await this.adapter.remove(receiptPath).catch(() => undefined);
-      await this.adapter.remove(journalPath);
+      await this.removeTransactionJournal(journalPath);
       throw error;
     }
   }
@@ -649,7 +743,7 @@ export class WikiService {
         unavailableReason: "该操作完成时尚未保存回滚快照，无法安全恢复更新前正文"
       };
     }
-    const receipt = this.parseRollbackReceipt(await this.adapter.read(receiptPath), operationId);
+    const receipt = await this.hydrateReceipt(this.parseRollbackReceipt(await this.adapter.read(receiptPath), operationId));
     const conflicts = await this.rollbackConflicts(receipt);
     return {
       operationId,
@@ -667,7 +761,8 @@ export class WikiService {
   async rollbackOperation(operationId: string): Promise<RollbackResult> {
     const receiptPath = await this.rollbackReceiptPath(operationId);
     if (!(await this.adapter.exists(receiptPath))) throw new Error("该操作没有可用的回滚快照");
-    const receipt = this.parseRollbackReceipt(await this.adapter.read(receiptPath), operationId);
+    const storedReceipt = this.parseRollbackReceipt(await this.adapter.read(receiptPath), operationId);
+    const receipt = await this.hydrateReceipt(storedReceipt);
     if (receipt.status !== "applied") throw new Error("该操作已经回滚，不能重复执行");
     const conflicts = await this.rollbackConflicts(receipt);
     if (conflicts.length > 0) {
@@ -675,59 +770,71 @@ export class WikiService {
     }
 
     const rollbackOperationId = crypto.randomUUID();
+    const snapshots = await this.snapshotStore();
     const journal: TransactionJournal = {
+      version: 2,
       id: rollbackOperationId,
       status: "prepared",
       createdAt: new Date().toISOString(),
       kind: "rollback",
       originals: {},
+      entries: [],
       receiptPath,
-      receiptBefore: structuredClone(receipt)
+      receiptBefore: structuredClone(storedReceipt)
     };
     for (const change of receipt.changes) {
       const file = this.vault.getAbstractFileByPath(change.path);
-      journal.originals[change.path] = file instanceof TFile ? await this.vault.read(file) : null;
+      const before = file instanceof TFile ? await this.vault.read(file) : null;
+      const target = change.before ?? null;
+      journal.entries!.push({
+        path: change.path,
+        action: before === null ? "create" : "update",
+        beforeHash: before === null ? null : sha256(before),
+        ...(before === null ? {} : { beforeSnapshot: await snapshots.put(before) }),
+        afterHash: target === null ? null : sha256(target)
+      });
     }
     const journalPath = await this.transactionJournalPath(rollbackOperationId);
-    await this.writeInternalJson(journalPath, journal);
+    await this.writeTransactionJournal(journalPath, journal);
     journal.status = "applying";
-    await this.writeInternalJson(journalPath, journal);
+    await this.writeTransactionJournal(journalPath, journal);
     try {
       const restoredPaths: string[] = [];
       const deletedPaths: string[] = [];
       for (const change of [...receipt.changes].reverse()) {
         const file = this.vault.getAbstractFileByPath(change.path);
-        if (change.before === null) {
+        const before = change.before ?? null;
+        if (before === null) {
           if (!(file instanceof TFile)) throw new Error(`回滚删除目标不存在：${change.path}`);
           await this.app.fileManager.trashFile(file);
           deletedPaths.push(change.path);
         } else if (file instanceof TFile) {
-          await this.vault.modify(file, change.before);
+          await this.vault.modify(file, before);
           restoredPaths.push(change.path);
         } else {
           await ensureVisibleParent(this.vault, change.path);
-          await this.vault.create(change.path, change.before);
+          await this.vault.create(change.path, before);
           restoredPaths.push(change.path);
         }
       }
-      await this.reindex();
+      await this.reindex(receipt.changes.map((change) => change.path));
       const lint = await this.runLint();
       const lintErrors = lint.issues.filter((issue) => issue.severity === "error").length;
       receipt.status = "rolled_back";
       receipt.rolledBackAt = new Date().toISOString();
       receipt.rollbackOperationId = rollbackOperationId;
-      await atomicReplaceText(this.adapter, receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+      await atomicReplaceText(this.adapter, receiptPath, `${JSON.stringify(this.compactReceipt(receipt), null, 2)}\n`);
       await this.appendLog("Rollback", `回滚 ${receipt.summary}（恢复 ${restoredPaths.length}，删除 ${deletedPaths.length}，Lint ${lintErrors} 个错误）`);
       await this.recordOperation(rollbackOperationId, "rollback", `回滚 ${receipt.summary}`);
-      await this.adapter.remove(journalPath);
+      await this.removeTransactionJournal(journalPath);
       return { operationId, rollbackOperationId, restoredPaths, deletedPaths, lintErrors };
     } catch (error) {
       await this.rollbackJournal(journal);
-      await this.reindex().catch(() => undefined);
+      await this.reindex(receipt.changes.map((change) => change.path)).catch(() => undefined);
       if (journal.receiptBefore) {
         await atomicReplaceText(this.adapter, receiptPath, `${JSON.stringify(journal.receiptBefore, null, 2)}\n`).catch(() => undefined);
       }
-      await this.adapter.remove(journalPath).catch(() => undefined);
+      await this.removeTransactionJournal(journalPath).catch(() => undefined);
       throw error;
     }
   }
@@ -752,7 +859,7 @@ export class WikiService {
         blockers.push({ reason: `Ingest ${operationId} 没有回滚快照，无法判定其 Wiki 改动` });
         continue;
       }
-      const receipt = this.parseRollbackReceipt(await this.adapter.read(path), operationId);
+      const receipt = await this.hydrateReceipt(this.parseRollbackReceipt(await this.adapter.read(path), operationId));
       if (receipt.status === "rolled_back") continue;
       if (receipt.sourceIds.length !== 1 || receipt.sourceIds[0] !== sourceId) {
         blockers.push({ reason: `Ingest ${operationId} 与其他来源共享一个批次，不能单独删除` });
@@ -769,7 +876,7 @@ export class WikiService {
       for (const receipt of receipts) {
         for (const change of receipt.changes) {
           affected.add(change.path);
-          finalContents.set(change.path, change.before);
+          finalContents.set(change.path, change.before ?? null);
         }
       }
       const deletedTargets = new Set([...finalContents.entries()]
@@ -810,7 +917,7 @@ export class WikiService {
     for (const operationId of operationIds) {
       const path = await this.rollbackReceiptPath(operationId);
       if (!(await this.adapter.exists(path))) continue;
-      const receipt = this.parseRollbackReceipt(await this.adapter.read(path), operationId);
+      const receipt = await this.hydrateReceipt(this.parseRollbackReceipt(await this.adapter.read(path), operationId));
       if (receipt.status === "applied") receipts.push(receipt);
     }
     receipts.sort((left, right) => right.appliedAt.localeCompare(left.appliedAt));
@@ -864,9 +971,32 @@ export class WikiService {
     if (!(await this.adapter.exists(root))) return 0;
     const listing = await this.adapter.list(root);
     let recovered = 0;
-    for (const path of listing.files.filter((item) => item.endsWith(".json"))) {
+    const primaryPaths = listing.files.filter((item) => item.endsWith(".json")
+      && !item.endsWith(".recovery.json") && !item.endsWith(".fault.json"));
+    const recoveryOnly = listing.files
+      .filter((item) => item.endsWith(".recovery.json"))
+      .map((item) => item.replace(/\.recovery\.json$/, ".json"))
+      .filter((item) => !primaryPaths.includes(item));
+    for (const path of [...primaryPaths, ...recoveryOnly]) {
       try {
-        const journal = JSON.parse(await this.adapter.read(path)) as TransactionJournal;
+        const journal = await this.readRecoverableJournal(path);
+        if (journal.kind === "apply" && journal.receiptPath && await this.adapter.exists(journal.receiptPath)) {
+          // Receipt publication is the commit marker. A crash after it must not
+          // undo an operation that was already presented as successfully applied.
+          this.parseRollbackReceipt(await this.adapter.read(journal.receiptPath), journal.id);
+          await this.removeTransactionJournal(path);
+          recovered += 1;
+          continue;
+        }
+        if (journal.kind === "rollback" && journal.receiptPath && await this.adapter.exists(journal.receiptPath)) {
+          const receipt = this.parseRollbackReceipt(await this.adapter.read(journal.receiptPath),
+            journal.receiptBefore?.operationId ?? "");
+          if (receipt.status === "rolled_back" && receipt.rollbackOperationId === journal.id) {
+            await this.removeTransactionJournal(path);
+            recovered += 1;
+            continue;
+          }
+        }
         await this.rollbackJournal(journal);
         if (journal.kind === "rollback" && journal.receiptPath && journal.receiptBefore) {
           await atomicReplaceText(
@@ -877,10 +1007,17 @@ export class WikiService {
         } else if (journal.kind === "apply" && journal.receiptPath && await this.adapter.exists(journal.receiptPath)) {
           await this.adapter.remove(journal.receiptPath);
         }
-        await this.adapter.remove(path);
+        await this.removeTransactionJournal(path);
         recovered += 1;
-      } catch {
-        // Keep malformed journals for manual inspection.
+      } catch (error) {
+        // Preserve unresolved records, but also write a machine-readable fault so
+        // startup never silently skips a transaction whose state is unknown.
+        await atomicReplaceText(this.adapter, `${path}.fault.json`, `${JSON.stringify({
+          version: 1,
+          detectedAt: new Date().toISOString(),
+          journalPath: path,
+          error: error instanceof Error ? error.message : String(error)
+        }, null, 2)}\n`).catch(() => undefined);
       }
     }
     return recovered;
@@ -894,6 +1031,34 @@ export class WikiService {
   }
 
   private async rollbackJournal(journal: TransactionJournal): Promise<void> {
+    if (journal.version === 2 && journal.entries) {
+      const snapshots = await this.snapshotStore();
+      for (const entry of [...journal.entries].reverse()) {
+        const file = this.vault.getAbstractFileByPath(entry.path);
+        const current = file instanceof TFile ? await this.vault.read(file) : null;
+        const currentHash = current === null ? null : sha256(current);
+        // Crash may happen before or after a page write. Hashes make recovery
+        // idempotent without relying on a fragile "last completed step" field.
+        const state = classifyTransactionFile(entry.beforeHash, entry.afterHash, currentHash);
+        if (state === "not_applied") continue;
+        if (state === "conflict") {
+          throw new Error(`事务恢复冲突：${entry.path} 当前内容既不是写入前也不是写入后版本`);
+        }
+        if (entry.beforeHash === null) {
+          if (file instanceof TFile) await this.app.fileManager.trashFile(file);
+          continue;
+        }
+        if (!entry.beforeSnapshot) throw new Error(`事务缺少回滚快照：${entry.path}`);
+        const original = await snapshots.get(entry.beforeSnapshot);
+        if (sha256(original) !== entry.beforeHash) throw new Error(`事务回滚快照 Hash 不匹配：${entry.path}`);
+        if (file instanceof TFile) await this.vault.modify(file, original);
+        else {
+          await ensureVisibleParent(this.vault, entry.path);
+          await this.vault.create(entry.path, original);
+        }
+      }
+      return;
+    }
     for (const [path, original] of Object.entries(journal.originals).reverse()) {
       const file = this.vault.getAbstractFileByPath(path);
       if (original === null) {
@@ -921,7 +1086,7 @@ export class WikiService {
 
   private parseRollbackReceipt(content: string, operationId: string): RollbackReceipt {
     const value = JSON.parse(content) as Partial<RollbackReceipt>;
-    if (value.version !== 1 || value.operationId !== operationId
+    if ((value.version !== 1 && value.version !== 2) || value.operationId !== operationId
       || (value.status !== "applied" && value.status !== "rolled_back")
       || !Array.isArray(value.sourceIds) || !Array.isArray(value.changes)) {
       throw new Error("回滚快照损坏");
@@ -931,11 +1096,71 @@ export class WikiService {
         || (change.originalAction !== "create" && change.originalAction !== "update")
         || (change.rollbackAction !== "delete" && change.rollbackAction !== "restore")
         || typeof change.afterHash !== "string" || !/^[a-f0-9]{64}$/.test(change.afterHash)
-        || (change.before !== null && typeof change.before !== "string")) {
+        || (value.version === 1 && change.before !== null && typeof change.before !== "string")
+        || (value.version === 2 && change.rollbackAction === "restore"
+          && (typeof change.beforeSnapshot !== "string" || !/^[a-f0-9]{64}$/.test(change.beforeSnapshot)))) {
         throw new Error("回滚快照包含无效文件记录");
       }
     }
     return value as RollbackReceipt;
+  }
+
+  private async hydrateReceipt(receipt: RollbackReceipt): Promise<RollbackReceipt> {
+    if (receipt.version === 1) return receipt;
+    const snapshots = await this.snapshotStore();
+    return {
+      ...receipt,
+      changes: await Promise.all(receipt.changes.map(async (change) => ({
+        ...change,
+        before: change.rollbackAction === "delete"
+          ? null
+          : await snapshots.get(change.beforeSnapshot!)
+      })))
+    };
+  }
+
+  private compactReceipt(receipt: RollbackReceipt): RollbackReceipt {
+    if (receipt.version === 1) return receipt;
+    return {
+      ...receipt,
+      changes: receipt.changes.map(({ before: _before, ...change }) => change)
+    };
+  }
+
+  private async writeTransactionJournal(path: string, journal: TransactionJournal): Promise<void> {
+    const content = `${JSON.stringify(journal, null, 2)}\n`;
+    // The recovery replica is intentionally independent. Atomic replacement of
+    // both files means a torn/corrupt primary still has enough information to
+    // classify every target by before/after hash and recover automatically.
+    await atomicReplaceText(this.adapter, path.replace(/\.json$/, ".recovery.json"), content);
+    await atomicReplaceText(this.adapter, path, content);
+  }
+
+  private async readRecoverableJournal(path: string): Promise<TransactionJournal> {
+    const candidates = [path, path.replace(/\.json$/, ".recovery.json")];
+    const errors: string[] = [];
+    for (const candidate of candidates) {
+      if (!(await this.adapter.exists(candidate))) continue;
+      try {
+        const value = JSON.parse(await this.adapter.read(candidate)) as TransactionJournal;
+        if (!value || typeof value.id !== "string" || !value.originals || typeof value.originals !== "object") {
+          throw new Error("事务日志结构无效");
+        }
+        if (value.version === 2 && (!Array.isArray(value.entries) || value.entries.length === 0)) {
+          throw new Error("事务日志缺少文件条目");
+        }
+        return value;
+      } catch (error) {
+        errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(`事务日志及恢复副本均不可用：${errors.join("；")}`);
+  }
+
+  private async removeTransactionJournal(path: string): Promise<void> {
+    for (const candidate of [path, path.replace(/\.json$/, ".recovery.json"), `${path}.fault.json`]) {
+      if (await this.adapter.exists(candidate)) await this.adapter.remove(candidate);
+    }
   }
 
   private async rollbackConflicts(receipt: RollbackReceipt): Promise<Array<{ path: string; reason: string }>> {
@@ -1036,14 +1261,16 @@ export class WikiService {
   }
 
   private async appendLog(type: string, summary: string): Promise<void> {
-    const config = await this.loadConfig();
-    const file = this.vault.getAbstractFileByPath(config.paths.log);
-    const entry = `\n## [${isoDate()}]\n### ${type}\n- ${summary}\n`;
-    if (file instanceof TFile) {
-      await this.vault.process(file, (content) => `${content.trimEnd()}\n${entry}`);
-    } else {
-      await this.vault.create(config.paths.log, `# 操作日志\n${entry}`);
-    }
+    const write = this.logWriteTail.then(async () => {
+      const config = await this.loadConfig();
+      const entry = `\n## [${isoDate()}]\n### ${type}\n- ${summary}\n`;
+      const current = await this.adapter.exists(config.paths.log)
+        ? await this.adapter.read(config.paths.log)
+        : "# 操作日志\n";
+      await atomicReplaceText(this.adapter, config.paths.log, `${current.trimEnd()}\n${entry}`);
+    });
+    this.logWriteTail = write.catch(() => undefined);
+    await write;
   }
 
   private async writeVisible(path: string, content: string): Promise<void> {
@@ -1059,7 +1286,7 @@ export class WikiService {
 
   private async writeInternalJson(path: string, value: unknown): Promise<void> {
     await ensureAdapterFolder(this.adapter, path.split("/").slice(0, -1).join("/"));
-    await this.adapter.write(path, `${JSON.stringify(value, null, 2)}\n`);
+    await atomicReplaceText(this.adapter, path, `${JSON.stringify(value, null, 2)}\n`);
   }
 
   private async backupPath(source: string, target: string): Promise<void> {

@@ -7,6 +7,7 @@ import {
 } from "./agent/agent-settings";
 import { EmbeddedAgentRuntimeFactory } from "./agent/runtime-factory";
 import { AgentTranscriptTitleGenerator } from "./agent/transcript-title-generator";
+import { AgentTranscriptFormatter } from "./agent/transcript-formatter";
 import {
   FilePickerConnector,
   UrlCaptureConnector,
@@ -62,6 +63,7 @@ export default class LLMWikiPlugin extends Plugin {
     const http = new ObsidianHttpClient();
     const runtimeFactory = new EmbeddedAgentRuntimeFactory(this.secrets, () => this.settings);
     const transcriptTitleGenerator = new AgentTranscriptTitleGenerator(runtimeFactory, () => this.settings);
+    const transcriptFormatter = new AgentTranscriptFormatter(runtimeFactory, () => this.settings);
     this.wiki = new WikiService(this.app, (config) => createDefaultParserRegistry({
       mineru: {
         http,
@@ -82,6 +84,7 @@ export default class LLMWikiPlugin extends Plugin {
           getToken: () => this.secrets.get(VIDEO_VISION_SECRET_ID)
         },
         titleGenerator: transcriptTitleGenerator,
+        formatter: transcriptFormatter,
         jobs: createMediaJobStore(this.app.vault.adapter, config?.paths.internal ?? ".llm-wiki")
       }
     }));
@@ -113,6 +116,11 @@ export default class LLMWikiPlugin extends Plugin {
       if (await this.wiki.isInitialized()) {
         const recovered = await this.wiki.recoverTransactions();
         if (recovered > 0) new Notice(`T-Wiki 已恢复 ${recovered} 个未完成事务`);
+        try {
+          if (await this.workflows.restorePendingPlan()) new Notice("T-Wiki 已恢复待审核变更计划");
+        } catch (error) {
+          new Notice(`待审核计划无法安全恢复：${error instanceof Error ? error.message : String(error)}`);
+        }
         await this.restartWebClipperConnector();
       }
     });
@@ -513,6 +521,7 @@ function createMediaJobStore(adapter: DataAdapter, internalRoot: string): FileSy
 const DOUYIN_PARSE_PHASES: Readonly<Record<string, DouyinCapturePhase>> = {
   uploading: "uploading",
   transcribing: "transcribing",
+  "formatting-transcript": "formatting-transcript",
   "reading-media-info": "reading-media-info",
   "extracting-frames": "extracting-frames",
   "filtering-frames": "filtering-frames",

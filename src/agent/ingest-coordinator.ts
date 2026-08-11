@@ -13,6 +13,7 @@ import type {
   AgentRuntime,
   AgentToolCall,
   EvidenceReference,
+  EvidenceClaim,
   IngestCoverageReport,
   IngestInput,
   KnowledgeDecision,
@@ -86,6 +87,7 @@ export interface KnowledgeCandidateState {
   targetPath?: string;
   reason?: string;
   evidenceIds: EvidenceId[];
+  evidenceClaims: EvidenceClaim[];
   pageContent?: string;
   confidence?: number;
   needsExploration?: boolean;
@@ -141,6 +143,12 @@ interface MergeDecisionInput {
   targetPath?: string;
   reason: string;
   evidenceIds?: string[];
+  evidenceAssertions?: Array<{
+    evidenceId: string;
+    claim: string;
+    supportingQuote: string;
+    relation: "supports" | "contradicts" | "context";
+  }>;
   confidence?: number;
   needsExploration?: boolean;
 }
@@ -282,7 +290,9 @@ export class IngestCoordinator {
         for (const sectionId of [...new Set(chosen)].slice(0, 24)) {
           const section = sections.find((item) => item.sectionId === sectionId);
           if (!section) continue;
-          const evidenceId = ledger.recordRaw(source.sourceId, source.input.contentHash, section.sectionId);
+          const evidenceId = ledger.recordRaw(
+            source.sourceId, source.input.contentHash, section.sectionId, section.content
+          );
           source.reviewedSectionIds.push(section.sectionId);
           source.rawEvidenceIds.push(evidenceId);
           rawContentByEvidence.set(evidenceId, section.content);
@@ -531,7 +541,7 @@ export class IngestCoordinator {
         if (wikiEvidence.has(key)) {
           stats.wikiDuplicate += 1;
         } else {
-          const evidenceId = ledger.recordWiki(page.path, sha256(page.content));
+          const evidenceId = ledger.recordWiki(page.path, sha256(page.content), page.content);
           wikiEvidence.set(key, { page, evidenceId });
           stats.wikiUnique += 1;
         }
@@ -835,7 +845,7 @@ export class IngestCoordinator {
       if (!page) continue;
       const key = `${page.path}\u0000${sha256(page.content)}`;
       if (!wikiEvidence.has(key)) {
-        wikiEvidence.set(key, { page, evidenceId: ledger.recordWiki(page.path, sha256(page.content)) });
+        wikiEvidence.set(key, { page, evidenceId: ledger.recordWiki(page.path, sha256(page.content), page.content) });
       }
       for (const candidate of candidates) candidate.comparedWikiPaths.push(page.path);
     }
@@ -872,7 +882,7 @@ export class IngestCoordinator {
           candidate.decision = "already_covered";
           candidate.pageContent = undefined;
           const wikiId = findWikiEvidenceId(existing.path, ledger)
-            ?? ledger.recordWiki(existing.path, sha256(existing.content));
+            ?? ledger.recordWiki(existing.path, sha256(existing.content), existing.content);
           if (wikiId && !candidate.evidenceIds.includes(wikiId)) candidate.evidenceIds.push(wikiId);
         } else {
           await workingSet.edit(path, sha256(existing.content), existing.content, content, evidence);
@@ -1224,7 +1234,7 @@ function applyAnalysis(state: IngestWorkState, input: Record<string, unknown>, l
     state.candidates.push({
       candidateId, sourceId, proposedType: type, resolvedType: type, title, rawEvidenceIds: [...new Set(ids)],
       searchQueries: [...new Set([...stringArray(value.searchQueries).filter(Boolean), title])].slice(0, 5),
-      comparedWikiPaths: [], wikiMatches: [], evidenceIds: [...new Set(ids)], status: "discovered"
+      comparedWikiPaths: [], wikiMatches: [], evidenceIds: [...new Set(ids)], evidenceClaims: [], status: "discovered"
     });
   }
   for (const source of state.sources) source.draft ??= fallbackSourceDraft(source);
@@ -1335,6 +1345,22 @@ function applyDecisions(
       const match = [...wikiEvidence.values()].find((item) => item.page.path === candidate.targetPath);
       if (match && !candidate.evidenceIds.includes(match.evidenceId)) candidate.evidenceIds.push(match.evidenceId);
     }
+    candidate.evidenceClaims = [];
+    for (const assertion of input.evidenceAssertions ?? []) {
+      if (!candidate.evidenceIds.includes(assertion.evidenceId)) continue;
+      candidate.evidenceClaims.push(ledger.bindClaim(
+        assertion.evidenceId,
+        assertion.claim,
+        assertion.supportingQuote,
+        assertion.relation
+      ));
+    }
+    if (candidate.evidenceClaims.length === 0) {
+      candidate.evidenceClaims.push(ledger.bindClaimFromEvidence(
+        candidate.evidenceIds[0]!,
+        candidate.reason
+      ));
+    }
     candidate.status = "decided";
   }
 }
@@ -1348,7 +1374,8 @@ function buildCoverage(state: IngestWorkState, ledger: EvidenceLedger): IngestCo
     decision: candidate.decision ?? "insufficient_evidence",
     ...(candidate.targetPath ? { targetPath: candidate.targetPath } : {}),
     reason: candidate.reason ?? "证据不足，未形成独立知识变更",
-    evidence: ledger.resolveAll(candidate.evidenceIds.length > 0 ? candidate.evidenceIds : candidate.rawEvidenceIds, true)
+    evidence: ledger.resolveAll(candidate.evidenceIds.length > 0 ? candidate.evidenceIds : candidate.rawEvidenceIds, true),
+    evidenceClaims: candidate.evidenceClaims
   }));
   return {
     sources: state.sources.map((source) => ({
@@ -1766,10 +1793,14 @@ function mergePhase(payload: Record<string, unknown>, userDirection: string): Ph
         candidateId: stringSchema(), resolvedType: enumSchema(KNOWLEDGE_TYPES),
         decision: enumSchema(DECISIONS), targetPath: stringSchema(),
         reason: stringSchema(), evidenceIds: arraySchema(stringSchema(), 1, 30),
+        evidenceAssertions: arraySchema(objectSchema({
+          evidenceId: stringSchema(), claim: stringSchema(), supportingQuote: stringSchema(),
+          relation: enumSchema(["supports", "contradicts", "context"])
+        }, ["evidenceId", "claim", "supportingQuote", "relation"]), 1, 30),
         confidence: { type: "number", minimum: 0, maximum: 1 }, needsExploration: { type: "boolean" }
-      }, ["candidateId", "decision", "reason", "evidenceIds"]), 1, 5)
+      }, ["candidateId", "decision", "reason", "evidenceIds", "evidenceAssertions"]), 1, 5)
     }, ["decisions"]),
-    systemPrompt: `你负责逐候选比较 raw 与现有 Wiki，只做 created/updated/already_covered/source_only/insufficient_evidence 决策，不生成页面 Markdown。必须给出 resolvedType：协议、算法、设计模式、机制、原则、语言特性和技术比较属于 concept；人物、组织、产品、项目、服务和库等稳定命名对象属于 entity；跨多个概念的流程、全景和综合结论属于 synthesis。已有跨类型精确匹配时必须沿用其类型和路径，不能换目录重复创建。created/updated/already_covered 必须提供合法 targetPath；already_covered 必须绑定对应 Wiki evidenceId；跳过决策必须说明原因。不要生成 Source 页面。只有真实冲突、近似重复或缺少链接证据时才设置 needsExploration=true。${UNTRUSTED_CONTENT_RULE}${userDirection ? `用户方向：${userDirection}` : ""}`,
+    systemPrompt: `你负责逐候选比较 raw 与现有 Wiki，只做 created/updated/already_covered/source_only/insufficient_evidence 决策，不生成页面 Markdown。必须给出 resolvedType：协议、算法、设计模式、机制、原则、语言特性和技术比较属于 concept；人物、组织、产品、项目、服务和库等稳定命名对象属于 entity；跨多个概念的流程、全景和综合结论属于 synthesis。已有跨类型精确匹配时必须沿用其类型和路径，不能换目录重复创建。created/updated/already_covered 必须提供合法 targetPath；already_covered 必须绑定对应 Wiki evidenceId；跳过决策必须说明原因。每个候选必须提供 evidenceAssertions，把具体 claim 绑定到 evidenceId 中逐字存在的 supportingQuote；不要用目录、标题或泛化摘要冒充证据。不要生成 Source 页面。只有真实冲突、近似重复或缺少链接证据时才设置 needsExploration=true。${UNTRUSTED_CONTENT_RULE}${userDirection ? `用户方向：${userDirection}` : ""}`,
     userPrompt: JSON.stringify(payload)
   };
 }
@@ -1787,6 +1818,9 @@ function decisionIssues(candidates: KnowledgeCandidateState[], decisions: MergeD
     if (!String(decision.reason ?? "").trim()) issues.push(`${candidate.candidateId} 缺少 reason`);
     if ((decision.decision === "created" || decision.decision === "updated" || decision.decision === "already_covered")
       && !String(decision.targetPath ?? "").trim()) issues.push(`${candidate.candidateId} 缺少 targetPath`);
+    if (!Array.isArray(decision.evidenceAssertions) || decision.evidenceAssertions.length === 0) {
+      issues.push(`${candidate.candidateId} 缺少主张—证据绑定`);
+    }
   }
   return issues;
 }

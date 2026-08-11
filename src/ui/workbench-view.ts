@@ -526,6 +526,9 @@ export class WorkbenchView extends ItemView {
         const vision = visual.vision && typeof visual.vision === "object"
           ? visual.vision as Record<string, unknown>
           : {};
+        const formatting = options.formatting && typeof options.formatting === "object"
+          ? options.formatting as Record<string, unknown>
+          : {};
         const visualLines = source.source.kind === "video" && visual.enabled === true
           ? [
             "",
@@ -538,6 +541,13 @@ export class WorkbenchView extends ItemView {
           : [];
         const titleModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
           ?? this.plugin.settings.agent.models[0];
+        const formattingLines = formatting.mode === "constrained-llm"
+          ? [
+            `文字稿整理：约束式 Fast 模型（${titleModel?.id ?? "未配置 fast 模型"}）`,
+            `Agent 服务：${this.plugin.settings.agent.baseUrl}`,
+            "完整文字稿会分批发送给 Agent API；宿主会校验 Segment 顺序、数字、英文术语和字符守恒，校验失败自动回退本地分段。"
+          ]
+          : ["文字稿整理：纯本地规则，不会为分句分段额外发送完整文字稿。"];
         const summary = [
           `来源：${source.original.name}`,
           `大小：${formatBytes(source.original.size)}`,
@@ -551,12 +561,13 @@ export class WorkbenchView extends ItemView {
           ]),
           `标题生成：${titleModel?.id ?? "未配置 fast 模型"}`,
           "标题生成会把最多约 8,000 字的代表性文字稿发送给 Agent API。",
+          ...formattingLines,
           ...visualLines,
           "",
           ...(source.parse.status === "parsed"
             ? ["这会创建新的 Parse Revision，旧 revision 仍保留在 Manifest 历史中。", ""]
             : []),
-          "是否仅授权本次 ASR 转写及上方列出的视觉分析？"
+          "是否仅授权本次 ASR 转写、文字稿整理及上方列出的视觉分析？"
         ].join("\n");
         if (!await confirmAction(this.app, "确认远程解析", summary, "确认并解析", true)) return;
         transcribe.disabled = true;

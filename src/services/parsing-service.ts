@@ -98,16 +98,14 @@ export class ParsingFacade {
   }
 
   async importFiles(files: File[]): Promise<SourceManifest[]> {
-    const imported: SourceManifest[] = [];
-    for (const file of files) {
-      imported.push((await this.importSourceDetailed(
+    return Promise.all(files.map(async (file) => (await this.importSourceDetailed(
         file.name,
         sourceBodyFromBlob(file),
         { acquiredBy: "file-picker", deferParse: isMediaFileName(file.name) }
-      )).manifest);
-    }
-    return imported;
+      )).manifest));
   }
+
+  hasActiveTasks(): boolean { return this.orchestrator.hasActiveTasks(); }
 
   async importSource(
     name: string,

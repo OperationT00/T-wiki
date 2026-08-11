@@ -5,6 +5,7 @@ import test from "node:test";
 import { detectSource } from "../src/parsing/parser-registry";
 import { sourceBodyFromBytes, type ParseContext } from "../src/parsing/parser-types";
 import {
+  normalizeTranscriptSegments,
   paragraphizeUntimedText,
   TranscriptMarkdownBuilder
 } from "../src/parsing/media/transcript-markdown-builder";
@@ -78,6 +79,25 @@ test("untimed provider text becomes stable readable paragraphs without inventing
   assert.match(result.markdown, /> 转写服务未返回精确时间戳，以下文字已按语句自动分段。/);
   assert.doesNotMatch(result.markdown, /\*\*\[无时间戳\]\*\*/);
   assert.equal(result.markdown.split("\n\n").filter((part) => part.startsWith("这是一个")).length > 1, true);
+});
+
+test("long timed ASR segments split without losing characters or timeline order", () => {
+  const sentence = "这是一个用于验证长时间戳片段拆分的完整句子，其中包含多个自然停顿，并且必须保持原始字符不丢失。";
+  const original = sentence.repeat(18);
+  const segments = normalizeTranscriptSegments([{
+    startMs: 10_000,
+    endMs: 100_000,
+    text: original
+  }]);
+
+  assert.equal(segments.length > 1, true);
+  assert.equal(segments[0]?.startMs, 10_000);
+  assert.equal(segments.at(-1)?.endMs, 100_000);
+  assert.deepEqual(segments.map((segment) => segment.segmentId),
+    segments.map((_, index) => `s${String(index + 1).padStart(6, "0")}`));
+  assert.equal(segments.every((segment, index) => index === 0
+    || (segment.startMs ?? 0) >= (segments[index - 1]?.endMs ?? 0)), true);
+  assert.equal(segments.map((segment) => segment.text).join(""), original);
 });
 
 test("Bilibili caption package parses through the regular DocumentParser contract", async () => {

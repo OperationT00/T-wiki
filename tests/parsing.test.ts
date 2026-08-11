@@ -872,9 +872,42 @@ test("manifest commit failure rolls back newly published raw", async () => {
   const imported = await service.importBytes("rollback.md", new TextEncoder().encode("# Rollback\n\nBody.\n"));
   assert.equal(imported.parse.status, "parse_failed");
   assert.equal(imported.parse.revisions.length, 0);
+  assert.equal(imported.parse.attempts.some((attempt) => attempt.pendingRevision), false);
   assert.deepEqual((await adapter.list("raw/articles")).files, []);
   const sourceMapRoot = `.llm-wiki/source-maps/${imported.sourceId}`;
   assert.deepEqual((await adapter.list(sourceMapRoot)).files, []);
+});
+
+test("startup recovery commits a verified Raw left between publish and Manifest commit", async () => {
+  const adapter = new MemoryAdapter();
+  const service = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);
+  const parsed = await service.importBytes(
+    "recover-publish.md",
+    new TextEncoder().encode("# Recover publish\n\nDurable body.\n")
+  );
+  const revision = parsed.parse.revisions[0]!;
+  const manifestPath = `.llm-wiki/manifests/${parsed.sourceId}.json`;
+  const interrupted = JSON.parse(await adapter.read(manifestPath));
+  const { completedAt: _completedAt, ...pendingRevision } = revision;
+  interrupted.parse.status = "parsing";
+  interrupted.parse.startedAt = new Date().toISOString();
+  delete interrupted.parse.currentRevision;
+  interrupted.parse.revisions = [];
+  const attempt = interrupted.parse.attempts.at(-1);
+  attempt.status = "parsing";
+  delete attempt.completedAt;
+  attempt.pendingRevision = pendingRevision;
+  await adapter.write(manifestPath, `${JSON.stringify(interrupted, null, 2)}\n`);
+  service.dispose();
+
+  const recoveredService = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);
+  await recoveredService.initialize();
+  const recovered = await recoveredService.getSource(parsed.sourceId);
+  assert.equal(recovered.parse.status, "parsed");
+  assert.equal(recovered.parse.currentRevision, revision.revision);
+  assert.equal(recovered.parse.revisions.length, 1);
+  assert.equal(recovered.parse.revisions[0]?.artifactHash, revision.artifactHash);
+  assert.equal(recovered.parse.attempts.at(-1)?.pendingRevision, undefined);
 });
 
 function fakeParser(

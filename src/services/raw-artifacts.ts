@@ -6,6 +6,7 @@ import { replaceUnsafeFilenameCharacters } from "../utils/text-safety";
 import type {
   DocumentSourceMap,
   ParseIssue,
+  PendingParseRevision,
   ParseRevision,
   RawVerification,
   SourceManifest
@@ -14,7 +15,7 @@ import type { BuiltRawArtifact } from "../parsing/artifact-builder";
 import { BLOCK_MARKER } from "../parsing/block-indexer";
 import { ParserError } from "../parsing/parser-types";
 import { errorIssue } from "../parsing/pipeline-errors";
-import type { PublishedRawArtifact } from "../parsing/ports";
+import type { PublishedRawArtifact, RawPublishPlan } from "../parsing/ports";
 import { atomicWriteBinary, atomicWriteText, SourceMapStore } from "./source-store";
 
 const RAW_FRONTMATTER = /^---\n([\s\S]*?)\n---\n?/;
@@ -29,11 +30,7 @@ export class RawPublisher {
 
   async initialize(): Promise<void> {}
 
-  async publish(
-    manifest: SourceManifest,
-    revision: number,
-    built: BuiltRawArtifact
-  ): Promise<PublishedRawArtifact> {
+  plan(manifest: SourceManifest, revision: number, built: BuiltRawArtifact): RawPublishPlan {
     const folder = manifest.source.kind === "pdf"
       ? `${this.rawRoot}/documents`
       : manifest.source.kind === "audio"
@@ -44,9 +41,20 @@ export class RawPublisher {
     const basename = stablePublishedBasename(manifest)
       ?? canonicalBasename(built.suggestedBasename ?? manifest.original.name);
     const revisionSuffix = revision > 1 ? `--r${revision}` : "";
-    const rawPath = normalizeVaultPath(
-      `${folder}/${basename}--${manifest.sourceHash.slice(0, 8)}${revisionSuffix}.md`
-    );
+    return {
+      rawPath: normalizeVaultPath(
+        `${folder}/${basename}--${manifest.sourceHash.slice(0, 8)}${revisionSuffix}.md`
+      )
+    };
+  }
+
+  async publish(
+    manifest: SourceManifest,
+    revision: number,
+    built: BuiltRawArtifact,
+    plan = this.plan(manifest, revision, built)
+  ): Promise<PublishedRawArtifact> {
+    const rawPath = normalizeVaultPath(plan.rawPath);
     const rawExisted = await this.adapter.exists(rawPath);
     const createdAssets: string[] = [];
     try {
@@ -117,6 +125,13 @@ export class RawVerifier {
   ): Promise<{ body: string; sourceMap?: DocumentSourceMap }> {
     const revision = manifest.parse.revisions.find((item) => item.revision === revisionNumber);
     if (!revision) throw new Error(`解析 revision 不存在：${revisionNumber}`);
+    return this.readAndVerifyCandidate(manifest, revision);
+  }
+
+  async readAndVerifyCandidate(
+    manifest: SourceManifest,
+    revision: PendingParseRevision
+  ): Promise<{ body: string; sourceMap?: DocumentSourceMap }> {
     const normalizedRawPath = normalizeVaultPath(revision.rawPath);
     if (!normalizedRawPath.startsWith(`${normalizeVaultPath(this.rawRoot)}/`)
       || normalizedRawPath.split("/").includes("..")) {
@@ -249,7 +264,7 @@ function validatePageMarkers(body: string, expectedPageCount: number | undefined
 
 function validateSourceMap(
   manifest: SourceManifest,
-  revision: ParseRevision,
+  revision: ParseRevision | PendingParseRevision,
   body: string,
   sourceMap: DocumentSourceMap
 ): void {

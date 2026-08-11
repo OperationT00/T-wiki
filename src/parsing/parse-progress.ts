@@ -42,6 +42,7 @@ export class ParseProgressBus {
 }
 
 const STAGES: Record<string, { start: number; weight: number; fallback: string }> = {
+  queued: { start: 0, weight: 0, fallback: "等待解析槽位" },
   preparing: { start: 0, weight: 5, fallback: "正在准备原件" },
   probing: { start: 5, weight: 5, fallback: "正在选择解析器" },
   "preparing-media": { start: 10, weight: 3, fallback: "正在准备媒体" },
@@ -49,12 +50,13 @@ const STAGES: Record<string, { start: number; weight: number; fallback: string }
   "uploading-chunk": { start: 25, weight: 15, fallback: "正在上传音频分片" },
   "transcribing-chunk": { start: 40, weight: 30, fallback: "正在转写音频分片" },
   "merging-transcript": { start: 70, weight: 3, fallback: "正在合并时间轴" },
+  "formatting-transcript": { start: 73, weight: 2, fallback: "正在整理文字稿" },
   uploading: { start: 10, weight: 10, fallback: "正在上传文档" },
   parsing: { start: 10, weight: 70, fallback: "正在解析文档" },
   downloading: { start: 75, weight: 5, fallback: "正在下载解析结果" },
   transcribing: { start: 20, weight: 30, fallback: "正在转写音视频" },
-  "reading-media-info": { start: 73, weight: 3, fallback: "正在读取媒体信息" },
-  "extracting-frames": { start: 76, weight: 8, fallback: "正在提取候选画面" },
+  "reading-media-info": { start: 75, weight: 2, fallback: "正在读取媒体信息" },
+  "extracting-frames": { start: 77, weight: 7, fallback: "正在提取候选画面" },
   "filtering-frames": { start: 84, weight: 1, fallback: "正在筛选候选画面" },
   "visual-analysis": { start: 85, weight: 5, fallback: "正在进行视觉分析" },
   "building-markdown": { start: 90, weight: 3, fallback: "正在合成图文 Markdown" },

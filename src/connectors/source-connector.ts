@@ -44,16 +44,15 @@ export class FilePickerConnector implements SourceConnector {
 
   async importFiles(files: File[]): Promise<SourceManifest[]> {
     if (!this.context) throw new Error("FilePickerConnector 尚未启动");
-    const output: SourceManifest[] = [];
-    for (const file of files) {
+    const context = this.context;
+    return Promise.all(files.map(async (file) => {
       const body = sourceBodyFromBlob(file);
       const provenance = { acquiredBy: "file-picker", deferParse: isMediaFileName(file.name) };
-      const imported = this.context.importSourceBody
-        ? await this.context.importSourceBody(file.name, body, provenance)
-        : await this.context.importSource(file.name, await body.readAll(file.size), provenance);
-      output.push(imported.manifest);
-    }
-    return output;
+      const imported = context.importSourceBody
+        ? await context.importSourceBody(file.name, body, provenance)
+        : await context.importSource(file.name, await body.readAll(file.size), provenance);
+      return imported.manifest;
+    }));
   }
 
   async stop(): Promise<void> {

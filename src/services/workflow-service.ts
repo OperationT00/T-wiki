@@ -140,6 +140,7 @@ export class WorkflowService {
       }
       this.pendingPlan = plan;
       this.pendingAgentPlan = { plan, attempts, progressRunId: progress.runId };
+      await this.persistPending();
       this.ingestProgress.markAwaitingReview(progress.runId, plan.operations.length);
       return plan;
     } catch (error) {
@@ -257,6 +258,7 @@ export class WorkflowService {
     if (!options.dryRun) {
       this.pendingPlan = plan;
       this.pendingAgentPlan = { plan, attempts: [] };
+      await this.persistPending();
     }
     return plan;
   }
@@ -314,7 +316,7 @@ export class WorkflowService {
       if (completedSourceIds.length > 0) this.ingestProgress.markCompleted(pending.progressRunId, completedSourceIds);
       if (resetSourceIds.length > 0) this.ingestProgress.clear(resetSourceIds);
     }
-    this.clearPending();
+    await this.clearPending();
     return plan;
   }
 
@@ -324,7 +326,7 @@ export class WorkflowService {
       await this.wiki.updateIngestAttempt(attempt.sourceId, attempt.attemptId, "not_started");
     }
     this.ingestProgress.clear((pending?.attempts ?? []).map((item) => item.sourceId));
-    this.clearPending();
+    await this.clearPending();
   }
 
   async previewIngestRollback(target?: string): Promise<RollbackPreview> {
@@ -491,6 +493,7 @@ export class WorkflowService {
       const plan = await this.wiki.validateAgentPlan(result.plan);
       this.pendingPlan = plan;
       this.pendingAgentPlan = { plan, attempts: [] };
+      await this.persistPending();
       return { text: `已生成 Lint 修复计划：${plan.summary}`, plan };
     }
     if (command.name === "reindex") {
@@ -581,9 +584,56 @@ export class WorkflowService {
     if (this.pendingPlan) throw new Error("请先处理当前待审阅计划");
   }
 
-  private clearPending(): void {
+  async restorePendingPlan(): Promise<boolean> {
+    const store = await this.wiki.pendingPlanStore();
+    const stored = await store.load();
+    if (!stored) return false;
+    let plan: WikiChangePlan;
+    try {
+      plan = await this.wiki.validateAgentPlan(stored.plan);
+    } catch (error) {
+      const current = await this.wiki.currentHashes();
+      const alreadyApplied = stored.plan.operations.every((operation) =>
+        current.get(operation.path) === sha256(operation.content));
+      if (alreadyApplied) {
+        for (const item of stored.attempts) {
+          const sourceOperation = findSourceOperation(stored.plan, item.input);
+          await this.wiki.updateIngestAttempt(item.sourceId, item.attemptId, sourceOperation ? "ingested" : "not_started", {
+            sourcePage: sourceOperation?.path,
+            operationId: stored.plan.operationId,
+            acceptedPaths: stored.plan.operations.map((operation) => operation.path),
+            coverage: coverageForSource(stored.plan.ingestCoverage, item.sourceId),
+            hasUserExclusions: hasUserExclusions(coverageForSource(stored.plan.ingestCoverage, item.sourceId))
+          });
+        }
+        await store.clear();
+        return false;
+      }
+      throw error;
+    }
+    for (const item of stored.attempts) {
+      const source = await this.wiki.getSource(item.sourceId);
+      const attempt = source.ingest.attempts.find((candidate) => candidate.attemptId === item.attemptId);
+      if (!attempt || attempt.status !== "awaiting_review" || attempt.operationId !== plan.operationId) {
+        throw new Error(`待审核计划与来源状态不一致：${item.sourceId}`);
+      }
+    }
+    this.pendingPlan = plan;
+    this.pendingAgentPlan = { plan, attempts: stored.attempts };
+    return true;
+  }
+
+  private async persistPending(): Promise<void> {
+    if (!this.pendingPlan || !this.pendingAgentPlan) return;
+    if (typeof (this.wiki as unknown as { pendingPlanStore?: unknown }).pendingPlanStore !== "function") return;
+    await (await this.wiki.pendingPlanStore()).save(this.pendingPlan, this.pendingAgentPlan.attempts);
+  }
+
+  private async clearPending(): Promise<void> {
     this.pendingPlan = null;
     this.pendingAgentPlan = null;
+    if (typeof (this.wiki as unknown as { pendingPlanStore?: unknown }).pendingPlanStore !== "function") return;
+    await (await this.wiki.pendingPlanStore()).clear();
   }
 }
 

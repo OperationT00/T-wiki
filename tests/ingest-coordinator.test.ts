@@ -425,6 +425,7 @@ class CoordinatorRuntime implements AgentRuntime {
             : `wiki/concepts/${String(candidate.candidateId)}.md`,
           reason: "具有长期复用价值",
           evidenceIds: ["r0001"],
+          evidenceAssertions: [{ evidenceId: "r0001", claim: "TCP sticky packet is reusable knowledge", supportingQuote: "TCP sticky packet fact.", relation: "supports" }],
           confidence: 0.95,
           needsExploration: false
         } : {
@@ -433,6 +434,7 @@ class CoordinatorRuntime implements AgentRuntime {
           targetPath: "wiki/concepts/tcp-sticky-packet.md",
           reason: "现有页面已完整覆盖",
           evidenceIds: ["r0001", "w0001"],
+          evidenceAssertions: [{ evidenceId: "r0001", claim: "The source discusses TCP sticky packets", supportingQuote: "TCP sticky packet fact.", relation: "supports" }],
           confidence: 0.95,
           needsExploration: false
         })
@@ -470,6 +472,7 @@ class CrossTypeRuntime implements AgentRuntime {
           targetPath: "wiki/concepts/http-protocol.md",
           reason: "已有页面覆盖",
           evidenceIds: ["r0001", "w0001"],
+          evidenceAssertions: [{ evidenceId: "r0001", claim: "The source discusses TCP sticky packets", supportingQuote: "TCP sticky packet fact.", relation: "supports" }],
           confidence: 0.95,
           needsExploration: false
         }] } }],

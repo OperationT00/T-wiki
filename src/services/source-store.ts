@@ -511,7 +511,19 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
           ? 3
           : revision.artifactSchemaVersion === 2 ? 2 : 1
       })),
-      attempts: input.parse?.attempts ?? []
+      attempts: (input.parse?.attempts ?? []).map((attempt: Record<string, any>) => ({
+        ...attempt,
+        ...(attempt.pendingRevision && typeof attempt.pendingRevision === "object"
+          ? {
+            pendingRevision: {
+              ...attempt.pendingRevision,
+              artifactSchemaVersion: attempt.pendingRevision.artifactSchemaVersion === 3
+                ? 3
+                : attempt.pendingRevision.artifactSchemaVersion === 2 ? 2 : 1
+            }
+          }
+          : {})
+      }))
     }
   } as SourceManifest;
 }

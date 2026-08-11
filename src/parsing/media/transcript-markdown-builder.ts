@@ -27,7 +27,7 @@ export interface TranscriptMarkdownResult {
 
 export class TranscriptMarkdownBuilder {
   build(transcript: TimedTranscript, options: TranscriptMarkdownOptions = {}): TranscriptMarkdownResult {
-    const normalized = normalizeSegments(transcript.segments);
+    const normalized = normalizeTranscriptSegments(transcript.segments);
     if (normalized.length === 0) throw new ParserError("EMPTY_TRANSCRIPT", "转写结果为空");
     assertTimeline(normalized, transcript.durationMs);
     const paragraphs = aggregateSegments(normalized);
@@ -158,18 +158,33 @@ function escapeAlt(value: string): string {
   return value.replace(/[[\]\r\n]/g, " ").trim().slice(0, 160);
 }
 
-function normalizeSegments(input: TimedTranscriptSegment[]): TimedTranscriptSegment[] {
-  return input.flatMap((segment) => {
+export function normalizeTranscriptSegments(input: TimedTranscriptSegment[]): TimedTranscriptSegment[] {
+  const expanded = input.flatMap((segment) => {
     const text = segment.text.replace(/\s+/g, " ").trim();
     if (!text) return [];
-    if (segment.startMs !== undefined || segment.endMs !== undefined || text.length <= 480) {
+    if (text.length <= 480) {
       return [{ ...segment, text }];
     }
-    return paragraphizeUntimedText(text).map((paragraph) => ({
-      ...segment,
-      text: paragraph
-    }));
+    const pieces = splitSentenceUnits(text).flatMap(splitLongUnit);
+    const totalWeight = pieces.reduce((sum, piece) => sum + Math.max(1, coreLength(piece)), 0);
+    let consumed = 0;
+    return pieces.map((piece) => {
+      const weight = Math.max(1, coreLength(piece));
+      const startRatio = consumed / totalWeight;
+      consumed += weight;
+      const endRatio = consumed / totalWeight;
+      return {
+        ...segment,
+        text: piece,
+        startMs: interpolateTime(segment.startMs, segment.endMs, startRatio),
+        endMs: interpolateTime(segment.startMs, segment.endMs, endRatio)
+      };
+    });
   });
+  return expanded.map((segment, index) => ({
+    ...segment,
+    segmentId: `s${String(index + 1).padStart(6, "0")}`
+  }));
 }
 
 /**
@@ -233,6 +248,15 @@ function splitLongUnit(text: string): string[] {
   return chunks;
 }
 
+function coreLength(value: string): number {
+  return [...value.replace(/[\p{P}\p{Z}\s]/gu, "")].length;
+}
+
+function interpolateTime(startMs: number | undefined, endMs: number | undefined, ratio: number): number | undefined {
+  if (startMs === undefined || endMs === undefined) return ratio === 0 ? startMs : ratio === 1 ? endMs : undefined;
+  return Math.round(startMs + (endMs - startMs) * ratio);
+}
+
 function joinText(left: string, right: string): string {
   if (!left) return right;
   return `${left}${needsSpace(left, right) ? " " : ""}${right}`;
@@ -273,12 +297,16 @@ function aggregateSegments(segments: TimedTranscriptSegment[]): Paragraph[] {
       ? segment.endMs - current.startMs
       : 0;
     const speakerChanged = Boolean(current?.speaker && segment.speaker && current.speaker !== segment.speaker);
+    const combinedLength = (current?.text.length ?? 0) + segment.text.length;
+    const sentenceComplete = Boolean(current && isSentenceEnding(current.text));
+    const softLimit = duration > 45_000 || combinedLength > 600;
+    const hardLimit = duration > 75_000 || combinedLength > 900;
     const shouldBreak = Boolean(current) && (
       gap > 3000
-      || duration > 45_000
-      || current!.text.length + segment.text.length > 600
-      || (current!.text.length >= 160 && /[。！？.!?][”’」』】)]?$/.test(current!.text))
       || speakerChanged
+      || hardLimit
+      || (softLimit && sentenceComplete)
+      || (current!.text.length >= 160 && sentenceComplete)
     );
     if (!current || shouldBreak) {
       current = { startMs: segment.startMs, endMs: segment.endMs, text: segment.text, speaker: segment.speaker };

@@ -23,6 +23,7 @@ export interface WikiConfig {
     maxPages: number;
   };
   parsing: {
+    maxConcurrentTasks: number;
     maxImportBytes: number;
     maxMediaImportBytes: number;
     maxOutputBytes: number;
@@ -211,6 +212,8 @@ export interface ParseAttempt {
     error?: string;
   }>;
   resumeToken?: string;
+  /** Built output prepared for publication but not yet committed as a ParseRevision. */
+  pendingRevision?: PendingParseRevision;
   error?: PipelineError;
 }
 
@@ -231,6 +234,8 @@ export interface ParseRevision {
   quality: ParseQuality;
   warnings: ParseIssue[];
 }
+
+export type PendingParseRevision = Omit<ParseRevision, "completedAt">;
 
 export interface PublishedAsset {
   assetId: string;
@@ -260,12 +265,16 @@ export interface RollbackChange {
   path: string;
   originalAction: "create" | "update";
   rollbackAction: "delete" | "restore";
-  before: string | null;
+  /** Inline v1 payload. New receipts use beforeSnapshot instead. */
+  before?: string | null;
+  /** SHA-256 key in the content-addressed rollback snapshot store. */
+  beforeSnapshot?: string;
+  beforeHash?: string | null;
   afterHash: string;
 }
 
 export interface RollbackReceipt {
-  version: 1;
+  version: 1 | 2;
   operationId: string;
   status: "applied" | "rolled_back";
   summary: string;
@@ -431,6 +440,14 @@ export interface EvidenceReference {
   wikiHash?: string;
 }
 
+export interface EvidenceClaim {
+  claim: string;
+  relation: "supports" | "contradicts" | "context";
+  evidence: EvidenceReference;
+  supportingQuote: string;
+  quoteHash: string;
+}
+
 export type KnowledgeDecisionStatus =
   | "created"
   | "updated"
@@ -448,6 +465,8 @@ export interface KnowledgeDecision {
   targetPath?: string;
   reason: string;
   evidence: EvidenceReference[];
+  /** Verified claim-to-passage bindings. Legacy plans may omit this field. */
+  evidenceClaims?: EvidenceClaim[];
 }
 
 export interface IngestCoverageReport {

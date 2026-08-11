@@ -40,6 +40,12 @@ export function mergeConfig(input: Partial<WikiConfig>): WikiConfig {
     paths: { ...DEFAULT_CONFIG.paths, ...(input.paths ?? {}) },
     retrieval: { ...DEFAULT_CONFIG.retrieval, ...(input.retrieval ?? {}) },
     parsing: {
+      maxConcurrentTasks: boundedInteger(
+        legacyParsing.maxConcurrentTasks,
+        1,
+        8,
+        DEFAULT_CONFIG.parsing.maxConcurrentTasks
+      ),
       maxImportBytes: finiteNumber(legacyParsing.maxImportBytes) ?? DEFAULT_CONFIG.parsing.maxImportBytes,
       maxMediaImportBytes: finiteNumber(legacyParsing.maxMediaImportBytes)
         ?? DEFAULT_CONFIG.parsing.maxMediaImportBytes,
@@ -48,6 +54,12 @@ export function mergeConfig(input: Partial<WikiConfig>): WikiConfig {
       providers
     }
   };
+}
+
+function boundedInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const parsed = finiteNumber(value);
+  if (parsed === undefined) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

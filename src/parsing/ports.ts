@@ -1,6 +1,7 @@
 import type { BuiltRawArtifact } from "./artifact-builder";
 import type {
   DocumentSourceMap,
+  PendingParseRevision,
   RawVerification,
   SourceManifest
 } from "../types";
@@ -31,12 +32,22 @@ export interface ManifestRepositoryPort {
 
 export interface RawPublisherPort {
   initialize(): Promise<void>;
-  publish(
+  plan(
     manifest: SourceManifest,
     revision: number,
     built: BuiltRawArtifact
+  ): RawPublishPlan;
+  publish(
+    manifest: SourceManifest,
+    revision: number,
+    built: BuiltRawArtifact,
+    plan?: RawPublishPlan
   ): Promise<PublishedRawArtifact>;
   rollback(published: PublishedRawArtifact): Promise<void>;
+}
+
+export interface RawPublishPlan {
+  rawPath: string;
 }
 
 export interface PublishedRawArtifact {
@@ -49,6 +60,10 @@ export interface RawVerifierPort {
   readAndVerifyRevision(
     manifest: SourceManifest,
     revisionNumber: number
+  ): Promise<{ body: string; sourceMap?: DocumentSourceMap }>;
+  readAndVerifyCandidate(
+    manifest: SourceManifest,
+    revision: PendingParseRevision
   ): Promise<{ body: string; sourceMap?: DocumentSourceMap }>;
   verifyAll(manifests: SourceManifest[]): Promise<RawVerification[]>;
 }

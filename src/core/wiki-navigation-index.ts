@@ -45,7 +45,12 @@ export function buildNavigationIndex(
   fingerprint: string,
   generatedAt = new Date().toISOString()
 ): WikiNavigationIndex {
-  const normalized = pages.map((page) => ({
+  const normalized = pages.map(indexCardFromPage);
+  return assembleNavigationIndex(normalized, fingerprint, generatedAt);
+}
+
+export function indexCardFromPage(page: WikiPage): WikiIndexCard {
+  return {
     path: page.path,
     hash: sha256(page.content),
     type: page.type,
@@ -55,8 +60,31 @@ export function buildNavigationIndex(
     tldr: compactTldr(page.tldr || page.title),
     headings: extractHeadings(page.body, page.title),
     outgoing: [...new Set(page.links)].filter((link) => link !== withoutMd(page.path)).sort(),
-    backlinks: [] as string[]
-  })).sort((left, right) => left.path.localeCompare(right.path));
+    backlinks: []
+  };
+}
+
+export function patchNavigationIndex(
+  index: WikiNavigationIndex,
+  updates: ReadonlyMap<string, WikiIndexCard | null>,
+  fingerprint: string,
+  generatedAt = new Date().toISOString()
+): WikiNavigationIndex {
+  const pages = new Map(index.pages.map((page) => [page.path, { ...page, backlinks: [] }]));
+  for (const [path, card] of updates) {
+    if (card) pages.set(path, { ...card, backlinks: [] });
+    else pages.delete(path);
+  }
+  return assembleNavigationIndex([...pages.values()], fingerprint, generatedAt);
+}
+
+function assembleNavigationIndex(
+  input: WikiIndexCard[],
+  fingerprint: string,
+  generatedAt: string
+): WikiNavigationIndex {
+  const normalized = input.map((page) => ({ ...page, backlinks: [] as string[] }))
+    .sort((left, right) => left.path.localeCompare(right.path));
   const byPath = new Map(normalized.map((page) => [withoutMd(page.path), page]));
   for (const page of normalized) {
     for (const target of page.outgoing) {
@@ -79,6 +107,22 @@ export function buildNavigationIndex(
     pages: normalized,
     groups: { types, tags: sortRecord(tags) }
   };
+}
+
+export function renderVisibleNavigationIndex(index: WikiNavigationIndex, name: string, domain: string, date: string): string {
+  const dirs: Record<WikiPageType, string> = {
+    source: "sources", entity: "entities", concept: "concepts", synthesis: "synthesis", output: "outputs"
+  };
+  const lines = [`# ${name} — 目录索引`, "", `> ${domain}知识库`, `> 最后更新：${date}`, ""];
+  for (const type of PAGE_TYPES) {
+    lines.push(`## wiki/${dirs[type]}/`);
+    const pages = index.pages.filter((page) => page.type === type)
+      .sort((left, right) => left.title.localeCompare(right.title));
+    if (pages.length === 0) lines.push("*暂无条目*");
+    else for (const page of pages) lines.push(`- [[${withoutMd(page.path)}]] — ${compactTldr(page.tldr || page.title)}`);
+    lines.push("");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 export function rootIndexView(index: WikiNavigationIndex): WikiIndexRootView {

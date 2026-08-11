@@ -15,6 +15,7 @@ import {
   sanitizeGeneratedContentTitle,
   type TranscriptTitleGenerator
 } from "../media/transcript-title";
+import type { TranscriptFormatter } from "../media/transcript-formatter";
 import type {
   VideoVisualAnalyzer,
   VideoVisualOptions,
@@ -50,7 +51,7 @@ export class InMemoryMediaUploadConsent implements MediaUploadConsent {
 export class MediaTranscriptionParser implements DocumentParser {
   readonly descriptor = {
     id: "media-transcription",
-    version: "1.3.0",
+    version: "1.4.0",
     execution: "remote",
     supportedKinds: ["audio", "video"],
     capabilities: { sourceMap: false, assets: true, resumable: true },
@@ -64,7 +65,8 @@ export class MediaTranscriptionParser implements DocumentParser {
     private readonly visionCredentials: VisionCredentials = { async getToken() { return ""; } },
     private readonly visualFactory?: (options: VideoVisualOptions) => VideoVisualAnalyzer,
     private readonly titleGenerator?: TranscriptTitleGenerator,
-    private readonly mediaJobs?: MediaJobStorePort
+    private readonly mediaJobs?: MediaJobStorePort,
+    private readonly formatter?: TranscriptFormatter
   ) {}
 
   validateOptions(options: Readonly<Record<string, unknown>>): void {
@@ -96,6 +98,9 @@ export class MediaTranscriptionParser implements DocumentParser {
     const options = parseMediaTranscriptionOptions(optionsInput);
     const visualOptions = withSharedFfmpeg(options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS, options.preprocessing?.ffmpegPath);
     const title = this.titleGenerator?.fingerprint?.();
+    const formatter = options.formatting?.mode === "constrained-llm"
+      ? this.formatter?.fingerprint?.()
+      : undefined;
     let preprocessingFingerprint: string | undefined;
     if (options.preprocessing?.enabled && this.mediaJobs) {
       try {
@@ -105,13 +110,18 @@ export class MediaTranscriptionParser implements DocumentParser {
       }
     }
     if (input.kind !== "video" || !visualOptions.enabled) {
-      return title || preprocessingFingerprint
-        ? { ...(title ? { title } : {}), preprocessingFfmpeg: preprocessingFingerprint }
+      return title || formatter || preprocessingFingerprint
+        ? {
+          ...(title ? { title } : {}),
+          ...(formatter ? { formatter } : {}),
+          preprocessingFfmpeg: preprocessingFingerprint
+        }
         : undefined;
     }
     try {
       return {
         ...(title ? { title } : {}),
+        ...(formatter ? { formatter } : {}),
         preprocessingFfmpeg: preprocessingFingerprint,
         ffmpeg: await this.createVisualPipeline(visualOptions).fingerprint(signal),
         visionModel: visualOptions.vision.model
@@ -121,6 +131,7 @@ export class MediaTranscriptionParser implements DocumentParser {
       // prevents reusing an older visual revision while the runtime is absent.
       return {
         ...(title ? { title } : {}),
+        ...(formatter ? { formatter } : {}),
         preprocessingFfmpeg: preprocessingFingerprint,
         ffmpeg: "unavailable",
         visionModel: visualOptions.vision.model
@@ -147,6 +158,31 @@ export class MediaTranscriptionParser implements DocumentParser {
     context.reportProgress({ phase: "preparing-media", completed: 0, total: size, unit: "byte", message: "正在准备媒体转写" });
     const coordinated = await coordinator.transcribe(input, transport, options, context, resumeToken);
     const transcript = coordinated.transcript;
+    let documentTranscript = transcript;
+    let formattingApplied = false;
+    let formatterModel: string | undefined;
+    const formattingIssues = [];
+    if (options.formatting?.mode === "constrained-llm" && this.formatter) {
+      context.reportProgress({
+        phase: "formatting-transcript",
+        mode: "indeterminate",
+        message: "正在恢复文字稿标点和自然段"
+      });
+      try {
+        const formatted = await this.formatter.format(transcript, context.signal);
+        documentTranscript = formatted.transcript;
+        formattingApplied = formatted.applied;
+        formatterModel = formatted.model;
+        formattingIssues.push(...formatted.issues);
+      } catch (error) {
+        if (context.signal.aborted) throw error;
+        formattingIssues.push({
+          code: "TRANSCRIPT_FORMATTING_FALLBACK",
+          severity: "warning" as const,
+          message: `文字稿约束整理失败，已回退为本地确定性分段：${safeVisualError(error)}`
+        });
+      }
+    }
     let visual: Awaited<ReturnType<VideoVisualAnalyzer["analyze"]>> | undefined;
     const visualIssues = [];
     const visualOptions = withSharedFfmpeg(options.visual ?? DEFAULT_VIDEO_VISUAL_OPTIONS, options.preprocessing?.ffmpegPath);
@@ -156,7 +192,7 @@ export class MediaTranscriptionParser implements DocumentParser {
         visual = await this.createVisualPipeline(visualOptions).analyze(
           parseInputSource(input),
           input.name,
-          transcript,
+          documentTranscript,
           context
         );
         visualIssues.push(...visual.issues);
@@ -170,9 +206,9 @@ export class MediaTranscriptionParser implements DocumentParser {
       }
     }
     context.reportProgress({ phase: "building-markdown", mode: "indeterminate", message: "正在生成 Markdown" });
-    const documentTranscript = transcript.durationMs === undefined && visual?.metadata.durationMs
-      ? { ...transcript, durationMs: visual.metadata.durationMs }
-      : transcript;
+    if (documentTranscript.durationMs === undefined && visual?.metadata.durationMs) {
+      documentTranscript = { ...documentTranscript, durationMs: visual.metadata.durationMs };
+    }
     const sourceTitle = typeof input.sourceMetadata?.title === "string"
       ? input.sourceMetadata.title
       : input.name.replace(/\.[^.]+$/, "");
@@ -229,10 +265,13 @@ export class MediaTranscriptionParser implements DocumentParser {
         content_title: contentTitle,
         title_generated: String(titleGenerated),
         ...(titleModel ? { title_model: titleModel } : {}),
+        transcript_formatting: formattingApplied ? "constrained-llm" : "deterministic",
+        transcript_character_conservation: formattingApplied ? "passed" : "not_required",
+        ...(formatterModel ? { transcript_formatter_model: formatterModel } : {}),
         ...result.metadata
       },
       assets: visual?.assets ?? [],
-      issues: [...result.issues, ...coordinated.warnings, ...visualIssues],
+      issues: [...result.issues, ...coordinated.warnings, ...formattingIssues, ...visualIssues],
       stats: {
         durationMs: documentTranscript.durationMs,
         visualFrameCount: visual?.frames.length ?? 0,

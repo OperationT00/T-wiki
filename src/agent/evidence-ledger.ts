@@ -1,4 +1,5 @@
-import type { EvidenceReference } from "../types";
+import { sha256 } from "../core/wiki-core";
+import type { EvidenceClaim, EvidenceReference } from "../types";
 
 export type EvidenceId = string;
 
@@ -7,21 +8,27 @@ export class EvidenceLedger {
   private readonly wiki = new Set<string>();
   private readonly ids = new Map<EvidenceId, EvidenceReference>();
   private readonly keys = new Map<string, EvidenceId>();
+  private readonly contents = new Map<EvidenceId, string>();
+  private readonly claims = new Map<EvidenceId, EvidenceClaim[]>();
   private rawSequence = 0;
   private wikiSequence = 0;
 
-  recordRaw(sourceId: string, contentHash: string, sectionId: string): EvidenceId {
+  recordRaw(sourceId: string, contentHash: string, sectionId: string, content?: string): EvidenceId {
     const key = `${sourceId}\u0000${contentHash}\u0000${sectionId}`;
     this.raw.add(key);
-    return this.register(`raw:${key}`, {
+    const id = this.register(`raw:${key}`, {
       sourceId, contentHash, sectionId
     }, "r", () => ++this.rawSequence);
+    if (content !== undefined) this.contents.set(id, content);
+    return id;
   }
 
-  recordWiki(path: string, hash: string): EvidenceId {
+  recordWiki(path: string, hash: string, content?: string): EvidenceId {
     const key = `${path}\u0000${hash}`;
     this.wiki.add(key);
-    return this.register(`wiki:${key}`, { wikiPath: path, wikiHash: hash }, "w", () => ++this.wikiSequence);
+    const id = this.register(`wiki:${key}`, { wikiPath: path, wikiHash: hash }, "w", () => ++this.wikiSequence);
+    if (content !== undefined) this.contents.set(id, content);
+    return id;
   }
 
   hasRaw(sourceId: string, contentHash: string, sectionId: string): boolean {
@@ -65,6 +72,50 @@ export class EvidenceLedger {
     return [...this.ids.entries()].map(([id, reference]) => ({ id, reference: structuredClone(reference) }));
   }
 
+  bindClaim(
+    id: EvidenceId,
+    claim: string,
+    supportingQuote: string,
+    relation: EvidenceClaim["relation"] = "supports"
+  ): EvidenceClaim {
+    const reference = this.resolve(id);
+    const statement = claim.trim();
+    const quote = supportingQuote.trim();
+    if (!statement || !quote) throw new Error("证据主张和支持引文不能为空");
+    const content = this.contents.get(id);
+    if (!content) throw new Error(`Evidence ${id} 没有可验证正文`);
+    if (!containsNormalized(content, quote)) throw new Error(`Evidence ${id} 不包含支持引文`);
+    const value: EvidenceClaim = {
+      claim: statement,
+      relation,
+      evidence: reference,
+      supportingQuote: quote,
+      quoteHash: sha256(quote)
+    };
+    const existing = this.claims.get(id) ?? [];
+    if (!existing.some((item) => item.claim === value.claim && item.quoteHash === value.quoteHash)) {
+      existing.push(value);
+      this.claims.set(id, existing);
+    }
+    return structuredClone(value);
+  }
+
+  bindClaimFromEvidence(id: EvidenceId, claim: string): EvidenceClaim {
+    const content = this.contents.get(id);
+    if (!content) throw new Error(`Evidence ${id} 没有可验证正文`);
+    const quote = content
+      .split(/\n+/)
+      .map((line) => line.replace(/^\s*(?:#{1,6}|[-*>]|\d+[.)])\s*/, "").trim())
+      .find((line) => line.length >= 8)
+      ?.slice(0, 320);
+    if (!quote) throw new Error(`Evidence ${id} 没有可引用正文`);
+    return this.bindClaim(id, claim, quote, "supports");
+  }
+
+  claimsFor(ids: EvidenceId[]): EvidenceClaim[] {
+    return ids.flatMap((id) => (this.claims.get(id) ?? []).map((claim) => structuredClone(claim)));
+  }
+
   assertKnown(values: EvidenceReference[], required: boolean): void {
     if (required && values.length === 0) throw new Error("当前命令要求每个暂存变更绑定已读取证据");
     for (const value of values) {
@@ -89,4 +140,9 @@ export class EvidenceLedger {
     this.ids.set(id, structuredClone(reference));
     return id;
   }
+}
+
+function containsNormalized(content: string, quote: string): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  return normalize(content).includes(normalize(quote));
 }

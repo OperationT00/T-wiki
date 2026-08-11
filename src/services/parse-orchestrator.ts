@@ -4,6 +4,7 @@ import { sha256 } from "../core/wiki-core";
 import { clearAppTimeout, setAppTimeout, type AppTimer } from "../utils/timers";
 import { ArtifactBuilder } from "../parsing/artifact-builder";
 import { KeyedLock } from "../parsing/keyed-lock";
+import { AsyncTaskPool } from "../parsing/async-task-pool";
 import {
   ParseProgressBus,
   createProgressEvent,
@@ -30,6 +31,7 @@ import { interruptedError, toPipelineError } from "../parsing/pipeline-errors";
 import { sanitizeSourceUri } from "../parsing/source-uri";
 import type {
   ParseAttempt,
+  PendingParseRevision,
   ParseProgress,
   ParseProgressEvent,
   SourceManifest,
@@ -38,6 +40,7 @@ import type {
 
 export class ParseOrchestrator {
   private readonly activeControllers = new Map<string, AbortController>();
+  private readonly taskPool: AsyncTaskPool;
   constructor(
     private readonly objects: ObjectStorePort,
     private readonly manifests: ManifestRepositoryPort,
@@ -48,7 +51,9 @@ export class ParseOrchestrator {
     private readonly config: WikiConfig,
     private readonly progressBus = new ParseProgressBus(),
     private readonly lock = new KeyedLock()
-  ) {}
+  ) {
+    this.taskPool = new AsyncTaskPool(config.parsing.maxConcurrentTasks);
+  }
 
   async initialize(): Promise<void> {
     await Promise.all([
@@ -60,6 +65,10 @@ export class ParseOrchestrator {
     for (const manifest of await this.manifests.list()) {
       if (manifest.parse.status !== "parsing") continue;
       const attempt = latestActiveAttempt(manifest);
+      if (attempt?.pendingRevision) {
+        await this.recoverPendingRevision(manifest, attempt);
+        continue;
+      }
       const parser = attempt?.parserId
         ? this.registry.list().find((candidate) =>
           candidate.descriptor.id === attempt.parserId
@@ -110,7 +119,55 @@ export class ParseOrchestrator {
         return current;
       });
     }
-    for (const sourceId of resumable) await this.parseSource(sourceId, { resume: true });
+    await Promise.all(resumable.map((sourceId) => this.parseSource(sourceId, { resume: true })));
+  }
+
+  private async recoverPendingRevision(manifest: SourceManifest, attempt: ParseAttempt): Promise<void> {
+    const pending = attempt.pendingRevision!;
+    try {
+      await this.verifier.readAndVerifyCandidate(manifest, pending);
+      const completedAt = new Date().toISOString();
+      await this.manifests.update(manifest.sourceId, manifest.manifestRevision, (current) => {
+        const active = current.parse.attempts.find((candidate) => candidate.attemptId === attempt.attemptId);
+        const candidate = active?.pendingRevision;
+        if (!active || !candidate) throw new Error("待恢复的解析发布状态已经变化");
+        const existing = current.parse.revisions.find((revision) => revision.revision === candidate.revision);
+        if (existing && existing.artifactHash !== candidate.artifactHash) {
+          throw new Error(`解析 revision 冲突：${candidate.revision}`);
+        }
+        if (!existing) current.parse.revisions.push({ ...candidate, completedAt });
+        current.parse.status = "parsed";
+        current.parse.currentRevision = candidate.revision;
+        delete current.parse.startedAt;
+        delete current.parse.error;
+        active.status = "parsed";
+        active.completedAt = completedAt;
+        delete active.pendingRevision;
+        delete active.resumeToken;
+        delete active.error;
+        return current;
+      });
+    } catch (error) {
+      const recoveryError = {
+        code: "PUBLISH_RECOVERY_REQUIRED",
+        stage: "publish" as const,
+        message: `检测到未完成的 Raw 发布，自动校验未通过：${error instanceof Error ? error.message : String(error)}`,
+        retryable: true,
+        at: new Date().toISOString()
+      };
+      await this.manifests.update(manifest.sourceId, manifest.manifestRevision, (current) => {
+        current.parse.status = "parse_failed";
+        current.parse.error = recoveryError;
+        delete current.parse.startedAt;
+        const active = current.parse.attempts.find((candidate) => candidate.attemptId === attempt.attemptId);
+        if (active) {
+          active.status = "parse_failed";
+          active.completedAt = recoveryError.at;
+          active.error = recoveryError;
+        }
+        return current;
+      });
+    }
   }
 
   async discardResume(sourceId: string): Promise<SourceManifest> {
@@ -134,6 +191,11 @@ export class ParseOrchestrator {
   dispose(): void {
     for (const controller of this.activeControllers.values()) controller.abort();
     this.activeControllers.clear();
+    this.taskPool.dispose();
+  }
+
+  hasActiveTasks(): boolean {
+    return this.activeControllers.size > 0 || this.taskPool.queuedCount > 0;
   }
 
   async parseSource(
@@ -144,6 +206,44 @@ export class ParseOrchestrator {
       signal?: AbortSignal;
       parserId?: string;
     } = {}
+  ): Promise<SourceManifest> {
+    const queueController = new AbortController();
+    const relayAbort = (): void => queueController.abort();
+    options.signal?.addEventListener("abort", relayAbort, { once: true });
+    this.activeControllers.set(sourceId, queueController);
+    try {
+      const queuedManifest = await this.manifests.read(sourceId);
+      this.progressBus.publish(createProgressEvent({
+        sourceId,
+        sourceName: queuedManifest.original.name,
+        attemptId: randomUUID(),
+        parserId: "pending",
+        parserVersion: ""
+      }, {
+        phase: "queued",
+        completed: 0,
+        total: 1,
+        unit: "document",
+        message: `等待解析槽位（并发上限 ${this.taskPool.concurrency}）`
+      }, undefined, "running"));
+      return await this.taskPool.run(() => this.parseSourceLocked(sourceId, {
+        ...options,
+        signal: queueController.signal
+      }), queueController.signal);
+    } finally {
+      options.signal?.removeEventListener("abort", relayAbort);
+      if (this.activeControllers.get(sourceId) === queueController) this.activeControllers.delete(sourceId);
+    }
+  }
+
+  private async parseSourceLocked(
+    sourceId: string,
+    options: {
+      force?: boolean;
+      resume?: boolean;
+      signal?: AbortSignal;
+      parserId?: string;
+    }
   ): Promise<SourceManifest> {
     return this.lock.run(sourceId, async () => {
       const manifest = await this.manifests.read(sourceId);
@@ -376,6 +476,7 @@ export class ParseOrchestrator {
 
     let errorStage: "parse" | "publish" = "parse";
     let publishedForRollback: PublishedRawArtifact | undefined;
+    let pendingPrepared = false;
     try {
         const payload = resumable?.resumeToken && parser.resume
           ? await parser.resume(input, resumable.resumeToken, context)
@@ -421,15 +522,40 @@ export class ParseOrchestrator {
           unit: "document",
           message: "Markdown 标准化与质量检查完成"
         });
+        await flushProgress();
+        await progressQueue;
         const currentBeforePublish = await this.manifests.read(sourceId);
         const revisionNumber = Math.max(
           0,
           ...currentBeforePublish.parse.revisions.map((revision) => revision.revision)
         ) + 1;
+        const plan = this.publisher.plan(currentBeforePublish, revisionNumber, built);
+        const pendingRevision: PendingParseRevision = {
+          revision: revisionNumber,
+          parserId: parser.descriptor.id,
+          parserVersion: parser.descriptor.version,
+          parseKey,
+          rawPath: plan.rawPath,
+          contentHash: built.contentHash,
+          artifactHash: built.artifactHash,
+          artifactSchemaVersion: built.artifactSchemaVersion,
+          assets: built.assets.map(({ bytes: _bytes, ...asset }) => asset),
+          metadata: payload.metadata,
+          quality: built.quality,
+          warnings: payload.issues
+        };
         errorStage = "publish";
+        const prepared = await this.manifests.update(sourceId, currentBeforePublish.manifestRevision, (next) => {
+          const attempt = next.parse.attempts.find((candidate) => candidate.attemptId === attemptId);
+          if (!attempt || attempt.status !== "parsing") throw new Error("解析 Attempt 已不再处于运行状态");
+          attempt.pendingRevision = structuredClone(pendingRevision);
+          return next;
+        });
+        pendingPrepared = true;
         reportProgress({ phase: "publishing", completed: 0, total: 1, unit: "document" });
-        const published = await this.publisher.publish(currentBeforePublish, revisionNumber, built);
+        const published = await this.publisher.publish(prepared, revisionNumber, built, plan);
         publishedForRollback = published;
+        await this.verifier.readAndVerifyCandidate(prepared, pendingRevision);
         reportProgress({
           phase: "publishing",
           completed: 1,
@@ -448,32 +574,26 @@ export class ParseOrchestrator {
         );
         const committed = await this.manifests.update(sourceId, current.manifestRevision, (next) => {
           next.parse.status = "parsed";
-          next.parse.currentRevision = revisionNumber;
+          const attempt = next.parse.attempts.find((candidate) => candidate.attemptId === attemptId);
+          const candidate = attempt?.pendingRevision;
+          if (!attempt || !candidate || candidate.artifactHash !== pendingRevision.artifactHash) {
+            throw new Error("解析候选 Revision 在提交前发生变化");
+          }
+          next.parse.currentRevision = candidate.revision;
           delete next.parse.startedAt;
           delete next.parse.error;
-          const attempt = next.parse.attempts.find((candidate) => candidate.attemptId === attemptId);
-          if (attempt) {
-            attempt.status = "parsed";
-            attempt.completedAt = new Date().toISOString();
-            attempt.progress = persistedProgress(completedProgress);
-            delete attempt.resumeToken;
-            delete attempt.error;
+          const completedAt = new Date().toISOString();
+          attempt.status = "parsed";
+          attempt.completedAt = completedAt;
+          attempt.progress = persistedProgress(completedProgress);
+          delete attempt.resumeToken;
+          delete attempt.error;
+          next.parse.revisions.push({ ...candidate, completedAt });
+          for (const recordedAttempt of next.parse.attempts) {
+            if (recordedAttempt.pendingRevision?.revision === candidate.revision) {
+              delete recordedAttempt.pendingRevision;
+            }
           }
-          next.parse.revisions.push({
-            revision: revisionNumber,
-            parserId: parser.descriptor.id,
-            parserVersion: parser.descriptor.version,
-            parseKey,
-            completedAt: new Date().toISOString(),
-            rawPath: published.rawPath,
-            contentHash: built.contentHash,
-            artifactHash: built.artifactHash,
-            artifactSchemaVersion: built.artifactSchemaVersion,
-            assets: built.assets.map(({ bytes: _bytes, ...asset }) => asset),
-            metadata: payload.metadata,
-            quality: built.quality,
-            warnings: payload.issues
-          });
           return next;
         });
         publishedForRollback = undefined;
@@ -492,6 +612,8 @@ export class ParseOrchestrator {
             rollbackError = failure;
           }
         }
+        const rollbackRestoredPreviousState = !publishedForRollback
+          || (publishedForRollback.createdRaw && !rollbackError);
         const current = await this.manifests.read(sourceId);
         const normalizedError = rollbackError
           ? new ParserError(
@@ -532,6 +654,7 @@ export class ParseOrchestrator {
             attempt.completedAt = new Date().toISOString();
             attempt.progress = persistedProgress(failedProgress);
             attempt.error = pipelineError;
+            if (pendingPrepared && rollbackRestoredPreviousState) delete attempt.pendingRevision;
           }
           return next;
         });

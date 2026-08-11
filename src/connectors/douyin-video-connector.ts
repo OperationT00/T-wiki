@@ -28,6 +28,7 @@ export type DouyinCapturePhase =
   | "storing"
   | "uploading"
   | "transcribing"
+  | "formatting-transcript"
   | "reading-media-info"
   | "extracting-frames"
   | "filtering-frames"

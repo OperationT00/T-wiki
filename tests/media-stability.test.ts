@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ChunkedTranscriptionCoordinator, mergeChunkTranscripts } from "../src/parsing/media/chunked-transcription-coordinator";
+import {
+  ChunkedTranscriptionCoordinator,
+  mergeChunkTranscripts,
+  reconcileChunkBoundary
+} from "../src/parsing/media/chunked-transcription-coordinator";
 import type { MediaJobCheckpoint } from "../src/parsing/media/media-job";
 import { adaptTranscriptionResponse } from "../src/parsing/media/transcription-response-adapter";
 import { sourceBodyFromBytes, type ParseContext } from "../src/parsing/parser-types";
@@ -57,6 +61,28 @@ test("chunk merge offsets time, removes overlap text, and marks approximate posi
   assert.equal(transcript.segments[1]?.startMs, 900_000);
   assert.doesNotMatch(transcript.segments[1]?.text ?? "", /^分片边界的重复文字/);
   assert.ok(transcript.issues.some((issue) => issue.code === "TRANSCRIPT_TIMESTAMPS_APPROXIMATE"));
+});
+
+test("overlap reconciliation compares multiple timed segments and keeps protected negation", () => {
+  const previous = [
+    { startMs: 895_000, endMs: 898_500, text: "接下来介绍 TCP" },
+    { startMs: 898_500, endMs: 900_000, text: "三次握手。" }
+  ];
+  const incoming = [
+    { startMs: 898_000, endMs: 900_500, text: "接下来介绍TCP的三次握手，" },
+    { startMs: 900_500, endMs: 903_000, text: "首先客户端发送 SYN。" }
+  ];
+  const reconciled = reconcileChunkBoundary(previous, incoming, 900_000, 2_000);
+  assert.doesNotMatch(reconciled.map((item) => item.text).join(""), /^接下来介绍TCP/);
+  assert.match(reconciled.map((item) => item.text).join(""), /首先客户端发送 SYN/);
+
+  const protectedResult = reconcileChunkBoundary(
+    [{ startMs: 0, endMs: 2_000, text: "服务端不会立即建立连接" }],
+    [{ startMs: 1_000, endMs: 3_000, text: "服务端会立即建立连接，随后返回响应" }],
+    2_000,
+    1_000
+  );
+  assert.match(protectedResult[0]?.text ?? "", /^服务端会立即建立连接/);
 });
 
 test("media job store removes incomplete workspaces by source without deleting originals elsewhere", async () => {

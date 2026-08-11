@@ -178,6 +178,9 @@ export function parseMediaTranscriptionOptions(input: Readonly<Record<string, un
     channels: finite(preprocessingInput.channels, 1),
     resumeRetentionHours: finite(preprocessingInput.resumeRetentionHours, 24)
   };
+  const formattingInput = input.formatting && typeof input.formatting === "object"
+    ? input.formatting as Record<string, unknown>
+    : {};
   if (maxUploadBytes <= 0 || taskTimeoutMs < 1000) throw new ParserError("INVALID_PARSER_OPTIONS", "音视频上传限制或超时配置无效");
   if (preprocessing.chunkDurationSeconds < 60 || preprocessing.chunkDurationSeconds > 3600
     || preprocessing.overlapSeconds < 0 || preprocessing.overlapSeconds > 30
@@ -203,6 +206,9 @@ export function parseMediaTranscriptionOptions(input: Readonly<Record<string, un
       ? input.timestampUnit
       : "auto",
     preprocessing,
+    formatting: {
+      mode: formattingInput.mode === "constrained-llm" ? "constrained-llm" : "deterministic"
+    },
     visual: parseVideoVisualOptions(input.visual)
   };
 }

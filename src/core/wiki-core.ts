@@ -66,6 +66,7 @@ export const DEFAULT_CONFIG: WikiConfig = {
     maxPages: 12
   },
   parsing: {
+    maxConcurrentTasks: 3,
     maxImportBytes: 50 * 1024 * 1024,
     maxMediaImportBytes: 500 * 1024 * 1024,
     maxOutputBytes: 20 * 1024 * 1024,
@@ -143,6 +144,9 @@ export const DEFAULT_CONFIG: WikiConfig = {
             sampleRateHz: 16000,
             channels: 1,
             resumeRetentionHours: 24
+          },
+          formatting: {
+            mode: "deterministic"
           },
           visual: {
             enabled: false,
@@ -594,6 +598,15 @@ function validateStoredDecision(
     const operation = decision.targetPath ? operationByPath.get(decision.targetPath) : undefined;
     const expectedAction = decision.decision === "created" ? "create" : "update";
     if (!operation || operation.action !== expectedAction) throw new Error(`ingestCoverage 与操作不一致：${decision.candidateId}`);
+  }
+  for (const claim of decision.evidenceClaims ?? []) {
+    if (!claim || !String(claim.claim ?? "").trim()
+      || !["supports", "contradicts", "context"].includes(claim.relation)
+      || !String(claim.supportingQuote ?? "").trim()
+      || claim.quoteHash !== sha256(claim.supportingQuote)
+      || !claim.evidence || typeof claim.evidence !== "object") {
+      throw new Error(`ingestCoverage 主张证据无效：${decision.candidateId}`);
+    }
   }
 }
 

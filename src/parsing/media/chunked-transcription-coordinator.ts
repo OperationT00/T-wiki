@@ -164,6 +164,7 @@ export function mergeChunkTranscripts(checkpoint: MediaJobCheckpoint, transcript
     if (transcript.segments.length === 0) continue;
     const hasTimes = transcript.segments.some((segment) => segment.startMs !== undefined);
     if (!hasTimes) precision = precision === "segment" ? "chunk" : precision;
+    const adjustedSegments: TimedTranscriptSegment[] = [];
     for (const [segmentIndex, segment] of transcript.segments.entries()) {
       const adjusted: TimedTranscriptSegment = hasTimes
         ? {
@@ -179,8 +180,9 @@ export function mergeChunkTranscripts(checkpoint: MediaJobCheckpoint, transcript
       if (adjusted.startMs !== undefined && adjusted.startMs > checkpoint.durationMs + 1000) {
         throw new ParserError("TRANSCRIPTION_TIMELINE_OUT_OF_RANGE", "转写时间戳超出媒体时长");
       }
-      appendDeduplicated(output, adjusted);
+      adjustedSegments.push(adjusted);
     }
+    output.push(...reconcileChunkBoundary(output, adjustedSegments, chunk.startMs + chunk.overlapMs, chunk.overlapMs));
   }
   return {
     schemaVersion: 1,
@@ -202,24 +204,119 @@ export function mergeChunkTranscripts(checkpoint: MediaJobCheckpoint, transcript
   };
 }
 
-function appendDeduplicated(output: TimedTranscriptSegment[], next: TimedTranscriptSegment): void {
-  const previous = output.at(-1);
-  if (!previous) { output.push(next); return; }
-  const overlap = commonBoundary(previous.text, next.text);
-  if (overlap >= 8) next = { ...next, text: next.text.slice(overlap).trimStart() };
-  if (!next.text.trim()) return;
-  output.push(next);
+export function reconcileChunkBoundary(
+  previous: TimedTranscriptSegment[],
+  incoming: TimedTranscriptSegment[],
+  seamMs: number,
+  overlapMs: number
+): TimedTranscriptSegment[] {
+  if (previous.length === 0 || incoming.length === 0 || overlapMs <= 0) return incoming;
+  const windowPadding = Math.max(2_000, overlapMs);
+  const left = previous.filter((segment) => segment.endMs === undefined
+    || segment.endMs >= seamMs - overlapMs - windowPadding).slice(-6);
+  const right = incoming.filter((segment) => segment.startMs === undefined
+    || segment.startMs <= seamMs + windowPadding).slice(0, 6);
+  const leftText = left.map((segment) => segment.text).join("");
+  const rightText = right.map((segment) => segment.text).join("");
+  const matched = boundaryMatch(leftText, rightText);
+  if (matched < 8) return incoming;
+  return trimNormalizedPrefix(incoming, matched, seamMs);
 }
 
-function commonBoundary(left: string, right: string): number {
-  const maximum = Math.min(160, left.length, right.length);
+function boundaryMatch(left: string, right: string): number {
+  const normalizedLeft = normalizeBoundary(left).slice(-160);
+  const normalizedRight = normalizeBoundary(right).slice(0, 160);
+  const maximum = Math.min(normalizedLeft.length, normalizedRight.length);
   for (let length = maximum; length >= 8; length -= 1) {
-    if (normalize(left.slice(-length)) === normalize(right.slice(0, length))) return length;
+    if (normalizedLeft.slice(-length) === normalizedRight.slice(0, length)) return length;
+  }
+  const fuzzyMaximum = Math.min(normalizedRight.length, normalizedLeft.length + 2);
+  for (let rightLength = fuzzyMaximum; rightLength >= 12; rightLength -= 1) {
+    const rightCandidate = normalizedRight.slice(0, rightLength);
+    for (let delta = -2; delta <= 2; delta += 1) {
+      const leftLength = rightLength + delta;
+      if (leftLength < 12 || leftLength > normalizedLeft.length) continue;
+      const leftCandidate = normalizedLeft.slice(-leftLength);
+      if (!protectedBoundaryEqual(leftCandidate, rightCandidate)) continue;
+      const distance = levenshtein(leftCandidate, rightCandidate);
+      if (1 - distance / Math.max(leftLength, rightLength) >= 0.9) return rightLength;
+    }
   }
   return 0;
 }
 
-function normalize(value: string): string { return value.replace(/[\s，。！？、,.!?]/g, "").toLowerCase(); }
+function trimNormalizedPrefix(
+  segments: TimedTranscriptSegment[],
+  normalizedLength: number,
+  seamMs: number
+): TimedTranscriptSegment[] {
+  let remaining = normalizedLength;
+  const output: TimedTranscriptSegment[] = [];
+  for (const segment of segments) {
+    if (remaining <= 0) { output.push(segment); continue; }
+    const mapped = normalizeBoundaryWithMap(segment.text);
+    if (mapped.text.length <= remaining) {
+      remaining -= mapped.text.length;
+      continue;
+    }
+    const rawEnd = mapped.rawEnds[remaining - 1] ?? 0;
+    const text = segment.text.slice(rawEnd).trimStart();
+    remaining = 0;
+    if (text) output.push({
+      ...segment,
+      text,
+      startMs: segment.startMs === undefined ? undefined : Math.max(segment.startMs, seamMs)
+    });
+  }
+  return output;
+}
+
+function normalizeBoundary(value: string): string {
+  return normalizeBoundaryWithMap(value).text;
+}
+
+function normalizeBoundaryWithMap(value: string): { text: string; rawEnds: number[] } {
+  let text = "";
+  const rawEnds: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const normalized = value[index]!.normalize("NFKC").toLowerCase();
+    for (const character of normalized) {
+      if (/^[\p{P}\p{Z}\s]$/u.test(character)) continue;
+      text += character;
+      rawEnds.push(index + 1);
+    }
+  }
+  return { text, rawEnds };
+}
+
+function protectedBoundaryEqual(left: string, right: string): boolean {
+  const tokens = (value: string): string[] => value.match(/[a-z]+\d*|\d+(?:\.\d+)?/g) ?? [];
+  if (tokens(left).join("|") !== tokens(right).join("|")) return false;
+  for (const marker of ["不", "未", "无", "非", "禁止", "不能", "不会", "没有", "无需"]) {
+    if (count(left, marker) !== count(right, marker)) return false;
+  }
+  return true;
+}
+
+function count(value: string, pattern: string): number {
+  return value.split(pattern).length - 1;
+}
+
+function levenshtein(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1]! + 1,
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
+}
 
 function canDirectUpload(input: ParseInput, limit: number): boolean {
   const size = parseInputSize(input);
