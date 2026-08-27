@@ -1,5 +1,6 @@
 import type { AgentToolRisk, LlmToolDefinition } from "../types";
 import type { EvidenceLedger } from "./evidence-ledger";
+import type { ToolResource } from "./resource-scheduler";
 
 export interface ToolResult<T = unknown> {
   output: T;
@@ -12,6 +13,8 @@ export interface ToolDescriptor {
   inputSchema: Record<string, unknown>;
   risk: AgentToolRisk;
   parallelSafe: boolean;
+  /** Optional fine-grained locks; omitted tools use the safe read/write defaults. */
+  resources?: (input: unknown, context: ToolExecutionContext) => ToolResource[];
 }
 
 export interface AgentTool<TInput = any, TOutput = unknown> {

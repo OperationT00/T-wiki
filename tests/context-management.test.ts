@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { selectActiveTools } from "../src/agent/agent-loop";
+import { admitToolResults, selectActiveTools } from "../src/agent/agent-loop";
 import { AgentContextManager } from "../src/agent/context-manager";
 import { ContextMemory } from "../src/agent/context-memory";
 import { EvidenceLedger } from "../src/agent/evidence-ledger";
@@ -66,13 +66,49 @@ test("checkpoint validation removes forged evidence and deterministic fallback c
         { sourceId: "source-1", contentHash: "a".repeat(64), sectionId: "s0001" },
         { sourceId: "source-1", contentHash: "b".repeat(64), sectionId: "forged" }
       ]
-    }],
+    }, { statement: "unsupported model memory", evidence: [] }],
     unresolved: ["Need comparison"],
     nextActions: ["Search Wiki"]
   }, memory.snapshot(), ledger);
   assert.equal(value.phase, "knowledge_comparison");
   assert.equal(value.keyFindings[0]?.evidence.length, 1);
+  assert.equal(value.keyFindings.length, 1);
   assert.equal(manager.deterministicCheckpoint(memory.snapshot()).keyFindings.length, 1);
+});
+
+test("context compaction refuses an incomplete Tool Call/Result pair", () => {
+  const manager = new AgentContextManager();
+  const messages: AgentConversationMessage[] = [
+    { role: "user", content: [{ type: "text", text: "goal" }] },
+    { role: "assistant", content: [{ type: "tool_call", id: "call-a", name: "read_wiki_page", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", toolCallId: "different", output: {}, isError: false }] },
+    { role: "assistant", content: [{ type: "tool_call", id: "call-b", name: "read_wiki_page", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", toolCallId: "call-b", output: {}, isError: false }] },
+    { role: "assistant", content: [{ type: "tool_call", id: "call-c", name: "read_wiki_page", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", toolCallId: "call-c", output: {}, isError: false }] },
+    { role: "assistant", content: [{ type: "tool_call", id: "call-d", name: "read_wiki_page", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", toolCallId: "call-d", output: {}, isError: false }] }
+  ];
+  assert.equal(manager.canCompact(messages, 1), false);
+  const compacted = manager.compact(messages, checkpoint(), 1);
+  assert.equal(compacted.compactedTokens, 0);
+  assert.deepEqual(compacted.messages, messages);
+});
+
+test("parallel Tool Results are admitted under a batch budget with evidence priority", () => {
+  const results = ["a", "b", "c"].map((name, index) => ({
+    type: "tool_result" as const,
+    toolCallId: name,
+    output: index === 0
+      ? { evidenceId: "r0001", content: "EVIDENCE-".repeat(200) }
+      : { content: `${name}-`.repeat(200) },
+    isError: false
+  }));
+  const admitted = admitToolResults(results, 120);
+  assert.equal(admitted.length, 3);
+  assert.match(JSON.stringify(admitted[0]), /evidenceId/);
+  assert.match(JSON.stringify(admitted[0]), /truncated/);
+  assert.ok(JSON.stringify(admitted).length < JSON.stringify(results).length);
 });
 
 test("session tool cache keys immutable reads and evicts least recently used entries", () => {

@@ -29,6 +29,7 @@ import type {
 import type { AgentRunTrace } from "./agent-loop";
 import { CandidateWikiIndex, type CandidateWikiMatch } from "./candidate-wiki-index";
 import { EvidenceLedger, type EvidenceId } from "./evidence-ledger";
+import { validateDraftNumericConsistency } from "./fact-consistency";
 import { validateIngestCoverage } from "./ingest-coverage";
 import type { AgentRuntimeFactory } from "./runtime-factory";
 import { validateSchema, type ToolExecutionContext } from "./tools";
@@ -695,7 +696,7 @@ export class IngestCoordinator {
           role: "fast",
           stepName: "repair_wiki_page_drafts",
           batchSize: 1,
-          systemPrompt: `只修复一个 Wiki 页面草稿。直接返回完整 Markdown，不要返回 JSON、代码围栏或解释文字。不得改变已经冻结的知识决策、目标路径和 Evidence。${UNTRUSTED_CONTENT_RULE}`,
+          systemPrompt: `只修复一个 Wiki 页面草稿。直接返回完整 Markdown，不要返回 JSON、代码围栏或解释文字。不得改变已经冻结的知识决策、目标路径和 Evidence。若 issues 包含 NUMERIC_FACT_MISMATCH，必须把错误数值改回 supportingQuote 支持的数值和限定词，不得自行估算。${UNTRUSTED_CONTENT_RULE}`,
           userPrompt: JSON.stringify({ candidate: candidateSummary(candidate), payload: repairPayload, issues: invalid.issues }),
           fallbackReason: "wiki-page-draft-repair"
         }, trace, requests, input);
@@ -1616,6 +1617,8 @@ function draftContentIssues(candidate: KnowledgeCandidateState, content: string)
     if (!Array.isArray(parsed.frontmatter.conflicts)) issues.push("synthesis frontmatter conflicts 必须是数组");
   }
   if (!parsed.body.replace(/^#\s+.*$/m, "").trim()) issues.push("页面正文为空");
+  const numeric = validateDraftNumericConsistency(`${parsed.tldr}\n${parsed.body}`, candidate.evidenceClaims);
+  issues.push(...numeric.errors);
   return [...new Set(issues)];
 }
 

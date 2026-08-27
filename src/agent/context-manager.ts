@@ -18,7 +18,7 @@ export interface ContextCompactionResult {
 
 export class AgentContextManager {
   canCompact(messages: AgentConversationMessage[], keepToolTurns = 3): boolean {
-    return toolTurnStarts(messages).length > keepToolTurns;
+    return !hasIncompleteToolTurn(messages) && toolTurnStarts(messages).length > keepToolTurns;
   }
 
   usage(input: {
@@ -58,6 +58,9 @@ export class AgentContextManager {
     keepToolTurns: number
   ): ContextCompactionResult {
     const beforeTokens = estimateTokens(JSON.stringify(messages));
+    if (hasIncompleteToolTurn(messages)) {
+      return { messages, beforeTokens, afterTokens: beforeTokens, compactedTokens: 0 };
+    }
     const starts = toolTurnStarts(messages);
     if (starts.length <= keepToolTurns) return { messages, beforeTokens, afterTokens: beforeTokens, compactedTokens: 0 };
     const keepFrom = starts[Math.max(0, starts.length - keepToolTurns)]!;
@@ -70,10 +73,20 @@ export class AgentContextManager {
   }
 
   checkpointHistory(messages: AgentConversationMessage[], keepToolTurns: number): AgentConversationMessage[] {
+    if (hasIncompleteToolTurn(messages)) return messages;
     const starts = toolTurnStarts(messages);
     if (starts.length <= keepToolTurns) return messages;
     const keepFrom = starts[Math.max(0, starts.length - keepToolTurns)]!;
     return messages.slice(0, keepFrom);
+  }
+
+  estimateCompactionSavings(
+    messages: AgentConversationMessage[],
+    snapshot: ContextMemorySnapshot,
+    keepToolTurns: number
+  ): number {
+    const fallback = this.deterministicCheckpoint(snapshot);
+    return this.compact(messages, fallback, keepToolTurns).compactedTokens;
   }
 
   deterministicCheckpoint(snapshot: ContextMemorySnapshot): ContextCheckpoint {
@@ -110,6 +123,10 @@ export class AgentContextManager {
         const evidence = Array.isArray(item.evidence)
           ? item.evidence.filter((reference) => isKnownEvidence(reference, ledger)).map((reference) => structuredClone(reference))
           : [];
+        // LLM findings without a Ledger-backed reference are not facts.  They
+        // are omitted instead of being allowed to survive compaction as
+        // apparently authoritative memory.
+        if (evidence.length === 0) return [];
         return [{ statement: String(item.statement).trim().slice(0, 500), evidence }];
       }),
       unresolved: strings(value.unresolved, 20),
@@ -135,11 +152,24 @@ function toolTurnStarts(messages: AgentConversationMessage[]): number[] {
     const assistant = messages[index];
     const result = messages[index + 1];
     if (assistant?.role !== "assistant" || result?.role !== "user") continue;
-    const callIds = new Set(assistant.content.filter((item) => item.type === "tool_call").map((item) => item.id));
+    const callIds = assistant.content.filter((item) => item.type === "tool_call").map((item) => item.id);
     const resultIds = result.content.filter((item) => item.type === "tool_result").map((item) => item.toolCallId);
-    if (callIds.size > 0 && resultIds.length > 0 && resultIds.every((id) => callIds.has(id))) starts.push(index);
+    const uniqueCalls = new Set(callIds);
+    const uniqueResults = new Set(resultIds);
+    if (callIds.length > 0 && resultIds.length === callIds.length
+      && uniqueCalls.size === callIds.length && uniqueResults.size === resultIds.length
+      && callIds.every((id) => uniqueResults.has(id))) starts.push(index);
   }
   return starts;
+}
+
+function hasIncompleteToolTurn(messages: AgentConversationMessage[]): boolean {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant" || !message.content.some((item) => item.type === "tool_call")) continue;
+    if (!toolTurnStarts(messages).includes(index)) return true;
+  }
+  return false;
 }
 
 function checkpointText(value: ContextCheckpoint): string {

@@ -1,4 +1,4 @@
-import { Notice, PluginSettingTab, Setting, type SettingDefinitionItem, type ToggleComponent } from "obsidian";
+import { Notice, PluginSettingTab, Setting, type ToggleComponent } from "obsidian";
 
 import LLMWikiPlugin, {
   MINERU_CLOUD_SECRET_ID,
@@ -11,67 +11,90 @@ import type { ModelProfile, ParserProviderConfig } from "../types";
 
 const SAVED_SECRET_MASK = "••••••••••••••••••••";
 
+type SettingsPage = "general" | "budgets" | "sources" | "documents" | "media";
+
+const SETTINGS_PAGES: ReadonlyArray<{ id: SettingsPage; label: string }> = [
+  { id: "general", label: "常规" },
+  { id: "budgets", label: "Agent 预算" },
+  { id: "sources", label: "来源采集" },
+  { id: "documents", label: "文档解析" },
+  { id: "media", label: "音视频" }
+];
+
 function boundedInteger(value: string, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }
 
 export class LLMWikiSettingTab extends PluginSettingTab {
+  private activePage: SettingsPage = "general";
+  private renderGeneration = 0;
+
   constructor(private readonly plugin: LLMWikiPlugin) {
     super(plugin.app, plugin);
   }
 
-  /**
-   * Search metadata for Obsidian 1.13+. The imperative renderer remains the
-   * compatibility path for the plugin's current minimum Obsidian version.
-   */
-  getSettingDefinitions(): SettingDefinitionItem[] {
-    return [
-      settingIndex("Agent Runtime / LLM API", "API 协议、Base URL、Token、结构化输出、超时、重试和连接测试", ["模型服务", "Provider"]),
-      settingIndex("模型映射", "快速、默认和深度模型及上下文窗口", ["fast", "default", "deep"]),
-      settingIndex("Agent Loop 预算", "轮数、工具调用、页面变更、Token 和总耗时限制", ["budget"]),
-      settingIndex("Obsidian Web Clipper", "Clipper Inbox 路径、启动扫描和手动扫描", ["网页剪藏"]),
-      settingIndex("在线视频 / 抖音", "yt-dlp 路径、Cookie 浏览器、下载上限和任务超时", ["Douyin", "在线视频"]),
-      settingIndex("解析任务", "同时解析的文件数量和排队行为", ["并发", "队列"]),
-      settingIndex("文档解析 / MinerU", "MinerU 协议、Base URL、Token、OCR、模型和轮询设置", ["PDF", "OCR"]),
-      settingIndex("音视频解析", "远程转写、FFmpeg 预处理、分片、断点恢复和时间戳兼容", ["ASR", "Whisper", "大文件"]),
-      settingIndex("关键画面", "场景与周期抽帧、视觉 API、视觉模型和截图数量", ["Vision", "视频截图"])
-    ];
-  }
-
   display(): void {
     const { containerEl } = this;
+    const generation = ++this.renderGeneration;
     containerEl.empty();
-    new Setting(containerEl)
-      .setName("常规")
-      .setHeading();
+    containerEl.addClass("llm-wiki-settings");
+    this.renderPageNavigation(containerEl);
 
-    this.renderAgentSettings();
-
-    new Setting(containerEl)
-      .setName("模型映射")
-      .setHeading();
-    for (const role of ["fast", "default", "deep"] as const) this.renderModel(role);
-
-    this.renderAgentBudgets();
-
-    this.renderWebClipper();
-    this.renderOnlineVideo();
-    void (async () => {
-      await this.renderParsingConcurrency();
-      await this.renderMinerU();
-      await this.renderMediaTranscription();
-    })();
-
+    if (this.activePage === "general") {
+      new Setting(containerEl).setName("常规").setHeading();
+      this.renderAgentSettings();
+      new Setting(containerEl).setName("模型映射").setHeading();
+      for (const role of ["fast", "default", "deep"] as const) this.renderModel(role);
+    } else if (this.activePage === "budgets") {
+      this.renderAgentBudgets();
+    } else if (this.activePage === "sources") {
+      this.renderWebClipper();
+      this.renderOnlineVideo();
+    } else if (this.activePage === "documents") {
+      void (async () => {
+        await this.renderParsingConcurrency(generation);
+        if (generation === this.renderGeneration) await this.renderMinerU(generation);
+      })();
+    } else {
+      void this.renderMediaTranscription(generation);
+    }
   }
 
-  private async renderParsingConcurrency(): Promise<void> {
+  private renderPageNavigation(containerEl: HTMLElement): void {
+    const navigation = containerEl.createDiv({
+      cls: "llm-wiki-settings-nav",
+      attr: { role: "tablist", "aria-label": "T-Wiki 设置分类" }
+    });
+    for (const page of SETTINGS_PAGES) {
+      const active = page.id === this.activePage;
+      const button = navigation.createEl("button", {
+        text: page.label,
+        cls: `llm-wiki-settings-nav-button${active ? " is-active" : ""}`,
+        attr: {
+          type: "button",
+          role: "tab",
+          "aria-selected": String(active)
+        }
+      });
+      button.onclick = () => {
+        if (page.id === this.activePage) return;
+        this.activePage = page.id;
+        this.display();
+      };
+    }
+  }
+
+  private async renderParsingConcurrency(generation: number): Promise<void> {
     new Setting(this.containerEl).setName("解析任务").setHeading();
-    if (!(await this.plugin.wiki.isInitialized())) {
+    const initialized = await this.plugin.wiki.isInitialized();
+    if (generation !== this.renderGeneration) return;
+    if (!initialized) {
       this.containerEl.createEl("p", { text: "初始化 T-Wiki 后可配置解析并发。" });
       return;
     }
     const config = await this.plugin.wiki.loadConfig();
+    if (generation !== this.renderGeneration) return;
     let value = config.parsing.maxConcurrentTasks;
     new Setting(this.containerEl)
       .setName("同时解析数量")
@@ -425,17 +448,20 @@ export class LLMWikiSettingTab extends PluginSettingTab {
       }));
   }
 
-  private async renderMinerU(): Promise<void> {
+  private async renderMinerU(generation: number): Promise<void> {
     new Setting(this.containerEl)
       .setName("文档解析 / MinerU")
       .setHeading();
-    if (!(await this.plugin.wiki.isInitialized())) {
+    const initialized = await this.plugin.wiki.isInitialized();
+    if (generation !== this.renderGeneration) return;
+    if (!initialized) {
       this.containerEl.createEl("p", {
         text: "初始化 T-Wiki 后可配置 MinerU。"
       });
       return;
     }
     const config = await this.plugin.wiki.loadConfig();
+    if (generation !== this.renderGeneration) return;
     const current = config.parsing.providers["mineru-http"] ?? {
       enabled: false,
       priority: 50,
@@ -522,6 +548,7 @@ export class LLMWikiSettingTab extends PluginSettingTab {
         });
       });
     await refreshTokenState();
+    if (generation !== this.renderGeneration) return;
     new Setting(this.containerEl)
       .setName("模型版本")
       .addDropdown((dropdown) => dropdown
@@ -575,13 +602,16 @@ export class LLMWikiSettingTab extends PluginSettingTab {
       }));
   }
 
-  private async renderMediaTranscription(): Promise<void> {
+  private async renderMediaTranscription(generation: number): Promise<void> {
     new Setting(this.containerEl).setName("音视频解析").setHeading();
-    if (!(await this.plugin.wiki.isInitialized())) {
+    const initialized = await this.plugin.wiki.isInitialized();
+    if (generation !== this.renderGeneration) return;
+    if (!initialized) {
       this.containerEl.createEl("p", { text: "初始化 T-Wiki 后可配置音视频转写。" });
       return;
     }
     const config = await this.plugin.wiki.loadConfig();
+    if (generation !== this.renderGeneration) return;
     const current = config.parsing.providers["media-transcription"] ?? {
       enabled: false,
       priority: 100,
@@ -828,8 +858,4 @@ export class LLMWikiSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
   }
-}
-
-function settingIndex(name: string, desc: string, aliases: string[]): SettingDefinitionItem {
-  return { name, desc, aliases };
 }

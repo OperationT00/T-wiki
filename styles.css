@@ -1281,6 +1281,49 @@
   to { transform: translateX(100%); }
 }
 
+.llm-wiki-settings-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  margin: 0 0 18px;
+  padding: 8px 0 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  scrollbar-width: thin;
+}
+
+.llm-wiki-settings-nav-button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--button-radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  box-shadow: none;
+}
+
+.llm-wiki-settings-nav-button:hover {
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.llm-wiki-settings-nav-button.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.llm-wiki-settings-nav-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--interactive-accent);
+}
+
 /* Budget rows contain more controls than a normal Obsidian setting. Keep the
    label readable and let the numeric inputs share the remaining width. */
 .llm-wiki-budget-setting {

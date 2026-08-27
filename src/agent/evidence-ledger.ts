@@ -1,5 +1,6 @@
 import { sha256 } from "../core/wiki-core";
 import type { EvidenceClaim, EvidenceReference } from "../types";
+import { validateClaimNumericConsistency } from "./fact-consistency";
 
 export type EvidenceId = string;
 
@@ -85,6 +86,8 @@ export class EvidenceLedger {
     const content = this.contents.get(id);
     if (!content) throw new Error(`Evidence ${id} 没有可验证正文`);
     if (!containsNormalized(content, quote)) throw new Error(`Evidence ${id} 不包含支持引文`);
+    const numeric = validateClaimNumericConsistency(statement, quote, relation);
+    if (numeric.errors.length > 0) throw new Error(numeric.errors.join("；"));
     const value: EvidenceClaim = {
       claim: statement,
       relation,

@@ -21,6 +21,7 @@ import { AgentExecutionError } from "./agent-errors";
 import { ContextMemory } from "./context-memory";
 import { ToolResultCache } from "./tool-result-cache";
 import { ToolPolicy, ToolRegistry, type ToolExecutionContext } from "./tools";
+import { canonicalTaskKey, defaultToolResources, InFlightTaskRegistry, ResourceScheduler, type ToolResource } from "./resource-scheduler";
 
 export interface AgentLoopOptions {
   purpose: "ingest" | "query" | "chat" | "save" | "lint";
@@ -153,6 +154,7 @@ export class AgentLoop {
       status: "failed"
     };
     const cache = new ToolResultCache();
+    const inFlight = new InFlightTaskRegistry();
     const memory = new ContextMemory(
       options.purpose, options.context.evidenceLedger, options.context.workingSet, options.context.allowedSourceIds
     );
@@ -165,6 +167,7 @@ export class AgentLoop {
     let finalRepairCount = 0;
     let toolCallCount = 0;
     let pendingPhaseCheckpoint = false;
+    let lastCheckpointToolCalls = Number.NEGATIVE_INFINITY;
     let compactedTokens = 0;
     let cachedInputTokens = 0;
     const seenToolCallIds = new Set<string>();
@@ -205,43 +208,54 @@ export class AgentLoop {
           || contextUsage.liveContextTokens >= maxContextTokens * 0.5) {
           const aggressive = contextUsage.liveContextTokens >= maxContextTokens * 0.8;
           const keepToolTurns = aggressive ? 1 : 3;
-          const generated = await this.createCheckpoint(
-            runtime, memory, this.contextManager.checkpointHistory(messages, keepToolTurns),
-            maxContextTokens, sink, options.signal
+          const cooldownReady = toolCallCount - lastCheckpointToolCalls >= 2;
+          const estimatedSavings = this.contextManager.estimateCompactionSavings(
+            messages, memory.snapshot(), keepToolTurns
           );
-          memory.addCheckpoint(generated.checkpoint);
-          trace.inputTokens += generated.inputTokens;
-          trace.outputTokens += generated.outputTokens;
-          if (trace.inputTokens > options.budget.maxInputTokens) {
-            throw new Error("Agent Run 在 Checkpoint 后达到输入 Token 上限");
-          }
-          if (trace.outputTokens > options.budget.maxOutputTokens) {
-            throw new Error("Agent Run 在 Checkpoint 后达到输出 Token 上限");
-          }
-          if (generated.requestId) trace.requestIds.push(generated.requestId);
-          const compacted = this.contextManager.compact(messages, generated.checkpoint, keepToolTurns);
-          messages = compacted.messages;
-          compactedTokens += compacted.compactedTokens;
-          trace.contextCheckpoints ??= [];
-          trace.contextCheckpoints.push({
-            phase: generated.checkpoint.phase,
-            beforeTokens: compacted.beforeTokens,
-            afterTokens: compacted.afterTokens,
-            usedLlm: generated.usedLlm
-          });
-          pendingPhaseCheckpoint = false;
-          contextUsage = this.contextManager.usage({
-            systemPrompt: options.systemPrompt, tools: definitions, messages,
-            workingSetSummary: options.context.workingSet.summary(), maxContextTokens,
-            cumulativeInputTokens: trace.inputTokens, cumulativeOutputTokens: trace.outputTokens,
-            cachedInputTokens, cacheHits: cache.hits, checkpointCount: memory.checkpoints.length, compactedTokens
-          });
-          if (contextUsage.liveContextTokens >= maxContextTokens * 0.9) {
-            throw new AgentExecutionError(
-              "CONTEXT_CAPACITY_EXCEEDED",
-              `Agent 活动上下文压缩后仍超过模型容量的 90%：${contextUsage.liveContextTokens}/${maxContextTokens}；占用=${JSON.stringify(contextUsage.breakdown)}`,
-              false
+          const savingsReady = aggressive || pendingPhaseCheckpoint
+            || estimatedSavings >= Math.max(256, Math.floor(maxContextTokens * 0.05));
+          if (!cooldownReady || !savingsReady) {
+            trace.context = contextUsage;
+          } else {
+            const generated = await this.createCheckpoint(
+              runtime, memory, this.contextManager.checkpointHistory(messages, keepToolTurns),
+              maxContextTokens, sink, options.signal
             );
+            lastCheckpointToolCalls = toolCallCount;
+            memory.addCheckpoint(generated.checkpoint);
+            trace.inputTokens += generated.inputTokens;
+            trace.outputTokens += generated.outputTokens;
+            if (trace.inputTokens > options.budget.maxInputTokens) {
+              throw new Error("Agent Run 在 Checkpoint 后达到输入 Token 上限");
+            }
+            if (trace.outputTokens > options.budget.maxOutputTokens) {
+              throw new Error("Agent Run 在 Checkpoint 后达到输出 Token 上限");
+            }
+            if (generated.requestId) trace.requestIds.push(generated.requestId);
+            const compacted = this.contextManager.compact(messages, generated.checkpoint, keepToolTurns);
+            messages = compacted.messages;
+            compactedTokens += compacted.compactedTokens;
+            trace.contextCheckpoints ??= [];
+            trace.contextCheckpoints.push({
+              phase: generated.checkpoint.phase,
+              beforeTokens: compacted.beforeTokens,
+              afterTokens: compacted.afterTokens,
+              usedLlm: generated.usedLlm
+            });
+            pendingPhaseCheckpoint = false;
+            contextUsage = this.contextManager.usage({
+              systemPrompt: options.systemPrompt, tools: definitions, messages,
+              workingSetSummary: options.context.workingSet.summary(), maxContextTokens,
+              cumulativeInputTokens: trace.inputTokens, cumulativeOutputTokens: trace.outputTokens,
+              cachedInputTokens, cacheHits: cache.hits, checkpointCount: memory.checkpoints.length, compactedTokens
+            });
+            if (contextUsage.liveContextTokens >= maxContextTokens * 0.9) {
+              throw new AgentExecutionError(
+                "CONTEXT_CAPACITY_EXCEEDED",
+                `Agent 活动上下文压缩后仍超过模型容量的 90%：${contextUsage.liveContextTokens}/${maxContextTokens}；占用=${JSON.stringify(contextUsage.breakdown)}`,
+                false
+              );
+            }
           }
         }
         trace.context = contextUsage;
@@ -325,7 +339,8 @@ export class AgentLoop {
         messages.push({ role: "assistant", content: assistantContent });
         const execution = await this.executeCalls(
           turn.toolCalls, policy, options.context, options.budget.maxToolResultTokens,
-          sink, trace, cache, memory, toolFailures
+          Math.max(1_024, Math.floor(maxContextTokens * 0.35)),
+          sink, trace, cache, memory, toolFailures, inFlight
         );
         messages.push({ role: "user", content: execution.results });
         pendingPhaseCheckpoint ||= execution.phaseChanged;
@@ -381,6 +396,7 @@ export class AgentLoop {
       clearAppTimeout(wallTimer);
       options.signal?.removeEventListener("abort", abort);
       cache.clear();
+      inFlight.clear();
       await runtime.dispose();
     }
   }
@@ -390,14 +406,15 @@ export class AgentLoop {
     policy: ToolPolicy,
     context: ToolExecutionContext,
     maxResultTokens: number,
+    maxBatchResultTokens: number,
     sink: (event: AgentEvent) => void,
     trace: AgentRunTrace,
     cache: ToolResultCache,
     memory: ContextMemory,
-    failures: { byTool: Map<string, number>; byFingerprint: Map<string, number> }
+    failures: { byTool: Map<string, number>; byFingerprint: Map<string, number> },
+    inFlight: InFlightTaskRegistry
   ): Promise<{ results: AgentConversationContent[]; phaseChanged: boolean }> {
     const tools = calls.map((call) => ({ call, tool: this.registry.find(call.name) }));
-    const allParallel = tools.every(({ tool }) => tool?.descriptor.risk === "read" && tool.descriptor.parallelSafe);
     let phaseChanged = false;
     const execute = async ({ call, tool }: typeof tools[number]): Promise<AgentConversationContent> => {
       const started = Date.now();
@@ -407,7 +424,14 @@ export class AgentLoop {
         policy.authorize(tool, context, call.input);
         const cacheKey = cache.keyFor(call.name, asRecord(call.input));
         const cached = cacheKey ? cache.get(cacheKey) : undefined;
-        const result = cached ?? await tool.execute(call.input, context);
+        const dedupeKey = cacheKey ?? (
+          tool.descriptor.risk === "read" && tool.descriptor.parallelSafe
+            ? `${call.name}:${canonicalTaskKey(call.input)}`
+            : undefined
+        );
+        const result = cached ?? (dedupeKey
+          ? await inFlight.run(dedupeKey, () => tool.execute(call.input, context))
+          : await tool.execute(call.input, context));
         if (!cached && cacheKey) cache.set(cacheKey, result);
         const output = limitResult(result.output, maxResultTokens);
         trace.toolCalls.push({
@@ -463,10 +487,31 @@ export class AgentLoop {
         };
       }
     };
-    if (allParallel) return { results: await Promise.all(tools.map(execute)), phaseChanged };
-    const results: AgentConversationContent[] = [];
-    for (const item of tools) results.push(await execute(item));
-    return { results, phaseChanged };
+    const scheduler = new ResourceScheduler({ maxConcurrency: 4, maxReadConcurrency: 4 });
+    const scheduled = await scheduler.run(tools.map((item) => ({
+      id: item.call.id,
+      resources: item.tool
+        ? (() => {
+          const declared = item.tool!.descriptor.resources?.(item.call.input, context);
+          return declared && declared.length > 0
+            ? declared
+            : inferToolResources(item.tool!.descriptor.name, item.call.input,
+              item.tool!.descriptor.risk === "read", item.tool!.descriptor.parallelSafe);
+        })()
+        : [{ key: "agent:execution", mode: "write" as const }],
+      run: () => execute(item)
+    })), context.signal);
+    const fatal = scheduled.find((item) => item.status === "rejected" && item.error instanceof AgentExecutionError);
+    if (fatal?.error instanceof Error) throw fatal.error;
+    const results = scheduled.map((item, index) => item.status === "fulfilled"
+      ? item.value!
+      : ({
+        type: "tool_result" as const,
+        toolCallId: tools[index]!.call.id,
+        output: { error: item.error instanceof Error ? item.error.message : String(item.error) },
+        isError: true
+      }));
+    return { results: admitToolResults(results, maxBatchResultTokens), phaseChanged };
   }
 
   private async createCheckpoint(
@@ -521,6 +566,57 @@ export class AgentLoop {
   }
 }
 
+/**
+ * Conservative built-in resource map for the bundled Wiki tools.  The shared
+ * execution lock preserves the existing single-writer invariant; the named
+ * resource makes the dependency graph explicit for future finer-grained
+ * scheduling and for custom tools that opt into descriptor.resources.
+ */
+function inferToolResources(name: string, input: unknown, read: boolean, parallelSafe: boolean): ToolResource[] {
+  const fallback = defaultToolResources(read, parallelSafe);
+  const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const terminalBarrier = { key: "agent:terminal", mode: "read" as const };
+  const path = typeof record.path === "string" ? normalizeResourcePath(record.path) : undefined;
+  if (name === "create_wiki_page" || name === "edit_wiki_page") {
+    return [
+      { key: "agent:terminal", mode: "read" },
+      { key: "working-set", mode: "write" },
+      ...(path ? [{ key: `wiki:${path}`, mode: "write" as const }] : [])
+    ];
+  }
+  if (name === "validate_working_set") return [{ key: "working-set", mode: "write" }];
+  if (name === "inspect_changes") return [
+    { key: "agent:terminal", mode: "read" },
+    { key: "working-set", mode: "read" }
+  ];
+  if (name === "submit_changes") return [
+    { key: "working-set", mode: "write" },
+    { key: "agent:terminal", mode: "write" }
+  ];
+  if (name === "finish_without_changes" || name === "request_user_direction") {
+    return [{ key: "agent:terminal", mode: "write" }];
+  }
+  if (name === "get_lint_report") return [
+    { key: "agent:terminal", mode: "read" },
+    { key: "wiki:lint", mode: "read" }
+  ];
+  if (!read || !parallelSafe) return fallback;
+  if (name === "read_wiki_page" && path) return [terminalBarrier, { key: `wiki:${path}`, mode: "read" }];
+  if ((name === "read_raw_section" || name === "list_raw_outline" || name === "inspect_source")
+    && typeof record.sourceId === "string") {
+    return [terminalBarrier, { key: `raw:${record.sourceId}`, mode: "read" }];
+  }
+  if (name === "read_wiki_index" || name === "search_wiki" || name === "get_wiki_links") {
+    return [terminalBarrier, { key: "wiki:index", mode: "read" }];
+  }
+  if (name === "get_page_template") return [terminalBarrier, { key: "wiki:template", mode: "read" }];
+  return [terminalBarrier];
+}
+
+function normalizeResourcePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.md$/i, "");
+}
+
 function ensureBudget(
   options: AgentLoopOptions,
   started: number,
@@ -545,6 +641,48 @@ function limitResult(output: unknown, maxTokens: number): unknown {
   const limited = truncateToTokenBudget(serialized, maxTokens);
   if (limited === serialized) return output;
   return { truncated: true, content: limited, note: "Tool result exceeded the per-call token budget." };
+}
+
+/** Keep a burst of parallel Tool Results from consuming the whole next turn. */
+export function admitToolResults(
+  results: AgentConversationContent[],
+  maxTokens: number
+): AgentConversationContent[] {
+  const limit = Math.max(1, Math.floor(maxTokens));
+  const total = results.reduce((sum, item) => item.type === "tool_result"
+    ? sum + estimateTokens(serializeForTokens(item.output)) : sum, 0);
+  if (total <= limit) return results;
+  const candidates = results
+    .map((item, index) => ({ item, index, priority: item.type !== "tool_result"
+      ? 0
+      : item.isError ? 3 : hasEvidenceMarker(item.output) ? 2 : 1 }))
+    .filter((entry) => entry.item.type === "tool_result")
+    .sort((left, right) => right.priority - left.priority || left.index - right.index);
+  let remaining = limit;
+  const admitted = new Map<number, unknown>();
+  candidates.forEach((entry, index) => {
+    const share = index === candidates.length - 1
+      ? remaining
+      : Math.max(1, Math.floor(remaining / (candidates.length - index)));
+    const output = entry.item.type === "tool_result" ? limitResult(entry.item.output, share) : undefined;
+    admitted.set(entry.index, output);
+    remaining = Math.max(0, remaining - estimateTokens(serializeForTokens(output)));
+  });
+  return results.map((item, index) => item.type === "tool_result"
+    ? { ...item, output: admitted.get(index) ?? { truncated: true, content: "", note: "Tool result omitted by batch context budget." } }
+    : item);
+}
+
+function serializeForTokens(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+}
+
+function hasEvidenceMarker(output: unknown): boolean {
+  if (!output || typeof output !== "object") return false;
+  const record = output as Record<string, unknown>;
+  return typeof record.evidenceId === "string"
+    || (Array.isArray(record.evidenceIds) && record.evidenceIds.length > 0)
+    || record.evidenceEligible === true;
 }
 
 function summarizeToolInput(input: unknown): Record<string, unknown> {
