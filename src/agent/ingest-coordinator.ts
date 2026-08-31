@@ -1,4 +1,5 @@
 import { estimateTokens, truncateToTokenBudget } from "../core/context-budget";
+import { markdownSections } from "../core/markdown-sections";
 import { clearAppTimeout, setAppTimeout } from "../utils/timers";
 import {
   makePageTemplate,
@@ -33,7 +34,6 @@ import { validateDraftNumericConsistency } from "./fact-consistency";
 import { validateIngestCoverage } from "./ingest-coverage";
 import type { AgentRuntimeFactory } from "./runtime-factory";
 import { validateSchema, type ToolExecutionContext } from "./tools";
-import { markdownSections } from "./wiki-tools";
 import { WorkingSet, type StagedWikiPage, type WorkingSetHost } from "./working-set";
 import {
   enrichWikiContent,
@@ -435,7 +435,21 @@ export class IngestCoordinator {
     requests: ProviderRequestState,
     input: CoordinatorRunInput
   ): Promise<Map<string, string[]>> {
-    const outline = state.sources.map((source) => ({
+    const scoped = new Map<string, string[]>();
+    const remaining = state.sources.filter((source) => {
+      const incremental = source.input.incremental;
+      if (!incremental) return true;
+      scoped.set(source.sourceId, [
+        ...incremental.changedSectionIds,
+        ...incremental.contextSectionIds
+      ].slice(0, 24));
+      return false;
+    });
+    if (remaining.length === 0) {
+      input.sink({ type: "status", message: "已根据上一已沉淀版本定位变更章节，跳过全量章节选择…" });
+      return scoped;
+    }
+    const outline = remaining.map((source) => ({
       sourceId: source.sourceId,
       name: source.name,
       sections: (sections.get(source.sourceId) ?? []).map(({ content: _content, ...item }) => item)
@@ -447,12 +461,12 @@ export class IngestCoordinator {
         inputSchema: objectSchema({
           sources: arraySchema(objectSchema({
             sourceId: stringSchema(), sectionIds: arraySchema(stringSchema(), 1, 24), reason: stringSchema()
-          }, ["sourceId", "sectionIds"]), 1, state.sources.length)
+          }, ["sourceId", "sectionIds"]), 1, remaining.length)
         }, ["sources"]),
         systemPrompt: `你负责快速选择能代表来源主题、实体、概念和综合结构的章节。只能使用目录中存在的 sectionId；尽量一次批量完成。${UNTRUSTED_CONTENT_RULE}`,
         userPrompt: JSON.stringify({ outline })
       }, trace, requests, input);
-      const map = new Map<string, string[]>();
+      const map = new Map<string, string[]>(scoped);
       for (const value of arrayValue(result.sources)) {
         const item = recordValue(value);
         map.set(scalarString(item.sourceId), stringArray(item.sectionIds));
@@ -460,7 +474,7 @@ export class IngestCoordinator {
       return map;
     } catch (error) {
       input.sink({ type: "status", message: "章节选择结果无效，使用确定性代表章节继续…" });
-      return new Map();
+      return scoped;
     }
   }
 
@@ -905,7 +919,9 @@ export class IngestCoordinator {
     const sourcePaths = new Map<string, string>();
     for (const source of state.sources) {
       const existingMatches = pages.filter((page) => page.type === "source"
-        && (scalarString(page.frontmatter.raw_path) === source.input.rawPath
+        && ((source.input.lineage?.documentId
+          && scalarString(page.frontmatter.editable_document_id) === source.input.lineage.documentId)
+          || scalarString(page.frontmatter.raw_path) === source.input.rawPath
           || scalarString(page.frontmatter.raw_hash) === source.input.sourceHash));
       if (existingMatches.length > 1) throw new Error(`来源 ${source.sourceId} 匹配到多个 Source 页面`);
       const draft = source.draft ?? fallbackSourceDraft(source);
@@ -915,9 +931,13 @@ export class IngestCoordinator {
       if (!existing && pages.some((page) => page.path === path)) {
         path = `wiki/sources/${slug}-${source.input.sourceHash.slice(0, 8)}.md`;
       }
-      const related = state.candidates
+      const candidateLinks = state.candidates
         .filter((item) => item.sourceId === source.sourceId && item.targetPath)
         .map((item) => item.targetPath!.replace(/\.md$/i, ""));
+      const related = [...new Set([
+        ...(source.input.incremental && existing ? existing.related : []),
+        ...candidateLinks
+      ])];
       const base = existing?.frontmatter ? { ...existing.frontmatter } : parseMarkdown(
         path, makePageTemplate("source", draft.title, draft.tldr, draft.body)
       )!.frontmatter;
@@ -927,7 +947,7 @@ export class IngestCoordinator {
         schema_version: 1,
         type: "source",
         title: draft.title,
-        tldr: draft.tldr,
+        tldr: source.input.incremental && existing ? existing.tldr : draft.tldr,
         status: "draft",
         created: scalarString(base.created, date),
         updated: date,
@@ -938,11 +958,24 @@ export class IngestCoordinator {
         url: safeSourceUrl(metadataString(source.input.metadata?.url) || metadataString(source.input.metadata?.source))
           || scalarString(base.url),
         raw_path: source.input.rawPath,
-        raw_hash: source.input.sourceHash
+        raw_hash: source.input.sourceHash,
+        ...(source.input.lineage
+          ? {
+              source_origin: source.input.lineage.type,
+              editable_document_id: source.input.lineage.documentId,
+              ...(source.input.lineage.mode ? { revision_mode: source.input.lineage.mode } : {}),
+              ...(source.input.lineage.baseSourceId
+                ? { derived_from_source_id: source.input.lineage.baseSourceId }
+                : {})
+            }
+          : {})
       };
+      const sourceBody = source.input.incremental && existing
+        ? mergeIncrementalSourceBody(existing.body, source, draft.body)
+        : draft.body;
       const content = enrichWikiContent(
         path,
-        stringifyMarkdown(frontmatter, `${draft.body.trim()}\n`),
+        stringifyMarkdown(frontmatter, `${sourceBody.trim()}\n`),
         related
       );
       const evidence = ledger.resolveAll(source.rawEvidenceIds, true);
@@ -1367,17 +1400,32 @@ function applyDecisions(
 }
 
 function buildCoverage(state: IngestWorkState, ledger: EvidenceLedger): IngestCoverageReport {
-  const decisions: KnowledgeDecision[] = state.candidates.map((candidate) => ({
-    candidateId: candidate.candidateId,
-    sourceId: candidate.sourceId,
-    type: candidate.resolvedType,
-    title: candidate.title,
-    decision: candidate.decision ?? "insufficient_evidence",
-    ...(candidate.targetPath ? { targetPath: candidate.targetPath } : {}),
-    reason: candidate.reason ?? "证据不足，未形成独立知识变更",
-    evidence: ledger.resolveAll(candidate.evidenceIds.length > 0 ? candidate.evidenceIds : candidate.rawEvidenceIds, true),
-    evidenceClaims: candidate.evidenceClaims
-  }));
+  const decisions: KnowledgeDecision[] = state.candidates.map((candidate) => {
+    const source = state.sources.find((item) => item.sourceId === candidate.sourceId);
+    const lineage = source?.input.lineage;
+    const mode = lineage?.type === "user-revision" ? lineage.mode : undefined;
+    return {
+      candidateId: candidate.candidateId,
+      sourceId: candidate.sourceId,
+      type: candidate.resolvedType,
+      title: candidate.title,
+      decision: candidate.decision ?? "insufficient_evidence",
+      ...(candidate.targetPath ? { targetPath: candidate.targetPath } : {}),
+      reason: candidate.reason ?? "证据不足，未形成独立知识变更",
+      evidence: ledger.resolveAll(candidate.evidenceIds.length > 0 ? candidate.evidenceIds : candidate.rawEvidenceIds, true),
+      evidenceClaims: candidate.evidenceClaims,
+      ...(mode ? {
+        revisionContext: {
+          mode,
+          ...(lineage?.baseSourceId ? { baseSourceId: lineage.baseSourceId } : {}),
+          handling: mode === "supplement" ? "supplemented" as const
+            : mode === "correction" ? "corrected" as const
+              : "rewritten" as const,
+          provenance: "user-revision" as const
+        }
+      } : {})
+    };
+  });
   return {
     sources: state.sources.map((source) => ({
       sourceId: source.sourceId,
@@ -1835,8 +1883,46 @@ function sourceSummary(source: SourceReviewState): Record<string, unknown> {
     rawPath: source.input.rawPath,
     sourceHash: source.input.sourceHash,
     contentHash: source.input.contentHash,
-    metadata: source.input.metadata
+    metadata: source.input.metadata,
+    lineage: source.input.lineage,
+    incrementalScope: source.input.incremental,
+    provenanceRule: source.input.lineage?.type === "user-revision"
+      ? revisionProvenanceRule(source.input.lineage.mode)
+      : source.input.lineage?.type === "user-note"
+        ? "这是用户本人编写的笔记快照；可作为用户知识输入，但不得伪装成外部权威来源。"
+        : "这是导入来源的规范 Raw 快照。"
   };
+}
+
+function revisionProvenanceRule(mode: "supplement" | "correction" | "rewrite" | undefined): string {
+  if (mode === "supplement") {
+    return "这是用户补充快照：新增内容作为用户补充证据，不得改写为原始来源原话；与原内容冲突时必须同时保留双方限定。";
+  }
+  if (mode === "correction") {
+    return "这是用户纠错快照：结论必须绑定当前修订正文的逐字引文，并明确记录为用户纠正；不得把纠正后的说法伪装成原始来源陈述。";
+  }
+  if (mode === "rewrite") {
+    return "这是用户重写快照：可以改善组织和表达，但事实仍只能来自可验证引文；重写本身不能提升来源权威性。";
+  }
+  return "这是用户基于既有 Raw 制作的修订快照；不得把改动伪装成原始来源陈述，冲突必须显式保留。";
+}
+
+function mergeIncrementalSourceBody(
+  existingBody: string,
+  source: SourceReviewState,
+  revisionSummary: string
+): string {
+  const markerId = source.sourceId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const start = `<!-- llm-wiki:source-revision:${markerId}:start -->`;
+  const end = `<!-- llm-wiki:source-revision:${markerId}:end -->`;
+  const escaped = `${start}\n## 修订摘要\n\n${revisionSummary.trim()}\n\n${end}`;
+  const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}`, "g");
+  const withoutSameRevision = existingBody.replace(pattern, "").trim();
+  return `${withoutSameRevision}\n\n${escaped}\n`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function candidateSummary(candidate: KnowledgeCandidateState): Record<string, unknown> {

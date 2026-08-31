@@ -950,6 +950,44 @@
   padding: 8px;
 }
 
+.llm-wiki-editable-card {
+  position: relative;
+}
+
+.llm-wiki-note-status {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+}
+
+.llm-wiki-note-status.is-dirty,
+.llm-wiki-note-status.is-published {
+  border-color: var(--color-orange);
+  color: var(--color-orange);
+}
+
+.llm-wiki-note-status.is-absorbed {
+  border-color: var(--color-green);
+  color: var(--color-green);
+}
+
+.llm-wiki-note-status.is-missing {
+  border-color: var(--color-red);
+  color: var(--color-red);
+}
+
+.llm-wiki-editable-diff {
+  max-height: min(65vh, 720px);
+  overflow: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+
 .llm-wiki-danger {
   color: var(--text-error);
 }

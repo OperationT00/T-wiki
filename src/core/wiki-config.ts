@@ -33,7 +33,7 @@ export function mergeConfig(input: Partial<WikiConfig>): WikiConfig {
   for (const [providerId, provider] of Object.entries(providers)) {
     assertNoProviderSecrets(providerId, provider.options);
   }
-  return {
+  const merged: WikiConfig = {
     ...DEFAULT_CONFIG,
     ...input,
     schemaVersion: 4,
@@ -54,6 +54,22 @@ export function mergeConfig(input: Partial<WikiConfig>): WikiConfig {
       providers
     }
   };
+  assertEditableWorkspacePath(merged);
+  return merged;
+}
+
+function assertEditableWorkspacePath(config: WikiConfig): void {
+  const normalize = (value: string): string => value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const notes = normalize(config.paths.notes);
+  if (!notes || notes === "." || notes.split("/").includes("..")) {
+    throw new Error("用户笔记目录无效");
+  }
+  for (const candidate of [config.paths.raw, config.paths.wiki, config.paths.internal, ".obsidian"]) {
+    const protectedPath = normalize(candidate);
+    if (notes === protectedPath || notes.startsWith(`${protectedPath}/`) || protectedPath.startsWith(`${notes}/`)) {
+      throw new Error(`用户笔记目录不能与系统目录重叠：${notes}`);
+    }
+  }
 }
 
 function boundedInteger(value: unknown, min: number, max: number, fallback: number): number {

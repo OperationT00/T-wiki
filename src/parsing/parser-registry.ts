@@ -117,6 +117,9 @@ export function detectSource(
   if (extension === "md" || extension === "markdown") {
     return { extension: "md", mime: "text/markdown", kind: "markdown" };
   }
+  if (extension === "twdoc") {
+    return { extension, mime: "application/vnd.t-wiki.editable-document+json", kind: "markdown" };
+  }
   if (extension === "txt") return { extension: "txt", mime: "text/plain", kind: "text" };
   if (extension === "bili-caption") {
     return { extension, mime: "application/vnd.t-wiki.bilibili-caption+json", kind: "video" };

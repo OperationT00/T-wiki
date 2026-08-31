@@ -1,5 +1,6 @@
 import { ParserRegistry } from "./parser-registry";
 import { MarkdownParser } from "./parsers/markdown-parser";
+import { EditableDocumentBundleParser } from "./parsers/editable-document-bundle-parser";
 import { MinerUParser, type MinerUCredentials } from "./parsers/mineru-parser";
 import { PdfParser } from "./parsers/pdf-parser";
 import { TextParser } from "./parsers/text-parser";
@@ -30,6 +31,7 @@ export function createDefaultParserRegistry(dependencies: {
 } = {}): ParserRegistry {
   const registry = new ParserRegistry()
     .register(new PdfParser())
+    .register(new EditableDocumentBundleParser())
     .register(new MarkdownParser())
     .register(new TextParser())
     .register(new WebPageParser())

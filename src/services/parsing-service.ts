@@ -189,6 +189,16 @@ export class ParsingFacade {
     return { manifest, content: verified.body };
   }
 
+  async readVerifiedSourceRevision(
+    sourceId: string,
+    revisionNumber: number
+  ): Promise<{ manifest: SourceManifest; content: string }> {
+    await this.initialize();
+    const manifest = await this.store.manifests.read(sourceId);
+    const verified = await this.verifier.readAndVerifyRevision(manifest, revisionNumber);
+    return { manifest, content: verified.body };
+  }
+
   async verifyRaw(): Promise<RawVerification[]> {
     await this.initialize();
     const inspection = await this.store.manifests.inspect();

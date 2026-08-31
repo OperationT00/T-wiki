@@ -23,3 +23,14 @@ export function validateSourceDeletionChain(
   }
   return conflicts;
 }
+
+export function validateReceiptSourceScope(
+  receipt: RollbackReceipt,
+  allowedSourceIds: ReadonlySet<string>
+): Array<{ reason: string }> {
+  return receipt.sourceIds
+    .filter((sourceId) => !allowedSourceIds.has(sourceId))
+    .map((sourceId) => ({
+      reason: `Ingest ${receipt.operationId} 与删除范围之外的来源 ${sourceId} 共享批次`
+    }));
+}

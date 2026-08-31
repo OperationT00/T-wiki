@@ -878,6 +878,97 @@ test("manifest commit failure rolls back newly published raw", async () => {
   assert.deepEqual((await adapter.list(sourceMapRoot)).files, []);
 });
 
+test("editable snapshots reuse immutable objects but keep distinct Manifest identities", async () => {
+  const adapter = new MemoryAdapter();
+  const service = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);
+  const bytes = new TextEncoder().encode("---\ntitle: Shared note\n---\n\n# Shared note\n");
+  const first = await service.importSourceDetailed("shared.md", bytes, {
+    acquiredBy: "user-note",
+    kind: "markdown",
+    deduplicateManifest: false,
+    lineage: { type: "user-note", documentId: "document-first" }
+  });
+  const second = await service.importSourceDetailed("shared.md", bytes, {
+    acquiredBy: "user-note",
+    kind: "markdown",
+    deduplicateManifest: false,
+    lineage: { type: "user-note", documentId: "document-second" }
+  });
+  assert.notEqual(first.manifest.sourceId, second.manifest.sourceId);
+  assert.equal(first.manifest.sourceHash, second.manifest.sourceHash);
+  assert.equal(first.manifest.original.objectPath, second.manifest.original.objectPath);
+  assert.equal(first.manifest.source.lineage?.documentId, "document-first");
+  assert.equal(second.manifest.source.lineage?.documentId, "document-second");
+});
+
+test("editable snapshots compute a section delta against the latest absorbed publication", async () => {
+  const adapter = new MemoryAdapter();
+  const service = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);
+  const first = await service.importSourceDetailed(
+    "incremental-note.md",
+    new TextEncoder().encode("# Stable\n\nSame.\n\n## Changed\n\nOld fact.\n\n## Tail\n\nSame tail.\n"),
+    {
+      acquiredBy: "user-note",
+      kind: "markdown",
+      deduplicateManifest: false,
+      lineage: { type: "user-note", documentId: "document-incremental" }
+    }
+  );
+  const firstAttempt = await service.beginIngest(first.manifest.sourceId);
+  await service.updateIngestAttempt(first.manifest.sourceId, firstAttempt.attemptId, "ingested");
+
+  const second = await service.importSourceDetailed(
+    "incremental-note.md",
+    new TextEncoder().encode("# Stable\n\nSame.\n\n## Changed\n\nNew fact.\n\n## Tail\n\nSame tail.\n"),
+    {
+      acquiredBy: "user-note",
+      kind: "markdown",
+      deduplicateManifest: false,
+      lineage: { type: "user-note", documentId: "document-incremental" }
+    }
+  );
+  const prepared = await service.beginIngest(second.manifest.sourceId);
+  assert.equal(prepared.input.incremental?.previousSourceId, first.manifest.sourceId);
+  assert.deepEqual(prepared.input.incremental?.changedSectionIds, ["s0002"]);
+  assert.deepEqual(prepared.input.incremental?.contextSectionIds, ["s0001", "s0003"]);
+  assert.equal(prepared.input.incremental?.unchangedSectionCount, 2);
+});
+
+test("editable document bundles republish owned assets through the normal Raw verifier", async () => {
+  const adapter = new MemoryAdapter();
+  const service = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);
+  const image = new Uint8Array([82, 73, 70, 70, 9, 8, 7]);
+  const bundle = new TextEncoder().encode(`${JSON.stringify({
+    schemaVersion: 1,
+    markdown: "# Revised course\n\n![Frame](llm-wiki-asset:frame-1)\n",
+    metadata: { title: "Revised course" },
+    assets: [{
+      assetId: "frame-1",
+      mime: "image/webp",
+      data: Buffer.from(image).toString("base64"),
+      source: { startMs: 1_000 }
+    }]
+  })}\n`);
+  const imported = await service.importSourceDetailed("revised-course.twdoc", bundle, {
+    acquiredBy: "user-raw-revision",
+    kind: "markdown",
+    deduplicateManifest: false,
+    lineage: {
+      type: "user-revision",
+      documentId: "document-with-assets",
+      snapshotContentHash: "d".repeat(64),
+      baseSourceId: "base-source"
+    }
+  });
+  const revision = imported.manifest.parse.revisions[0]!;
+  assert.equal(revision.parserId, "editable-document-bundle");
+  assert.equal(revision.assets?.length, 1);
+  assert.equal(revision.assets?.[0]?.hash, sha256(image));
+  const verified = await service.readVerifiedSource(imported.manifest.sourceId);
+  assert.match(verified.content, /\.\.\/assets\/.+\/frame-1\.webp/);
+  assert.deepEqual((await service.verifyRaw()).find((item) => item.sourceId === imported.manifest.sourceId)?.issues, []);
+});
+
 test("startup recovery commits a verified Raw left between publish and Manifest commit", async () => {
   const adapter = new MemoryAdapter();
   const service = new ParsingService(adapter as unknown as DataAdapter, DEFAULT_CONFIG);

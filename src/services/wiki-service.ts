@@ -50,7 +50,19 @@ import type {
 } from "../types";
 import type { ParseProgressListener } from "../parsing/parse-progress";
 import { ParsingFacade } from "./parsing-service";
-import { validateSourceDeletionChain } from "./source-deletion";
+import {
+  currentRawBase,
+  EditableDocumentService
+} from "../editable-documents/editable-document-service";
+import type {
+  EditablePublicationHistoryItem,
+  EditableDocumentView,
+  EditableRebasePreview,
+  EditableRevisionMode,
+  TextDiff
+} from "../editable-documents/types";
+import { computeTextDiff } from "../editable-documents/text-diff";
+import { validateReceiptSourceScope, validateSourceDeletionChain } from "./source-deletion";
 import { ContentSnapshotStore } from "./content-snapshot-store";
 import { PendingPlanStore } from "./pending-plan-store";
 import { classifyTransactionFile } from "./transaction-recovery";
@@ -107,6 +119,7 @@ export class WikiService {
   private navigationIndexDirty = false;
   private readonly dirtyWikiPaths = new Set<string>();
   private logWriteTail: Promise<void> = Promise.resolve();
+  private editableDocumentsFacade: EditableDocumentService | null = null;
 
   constructor(
     private readonly app: App,
@@ -212,6 +225,7 @@ export class WikiService {
       `${config.paths.wiki}/sources`, `${config.paths.wiki}/entities`,
       `${config.paths.wiki}/concepts`, `${config.paths.wiki}/synthesis`,
       `${config.paths.wiki}/outputs`,
+      `${config.paths.notes}/notes`, `${config.paths.notes}/revisions`, `${config.paths.notes}/assets`,
       "templates", `${config.paths.internal}/objects/sha256`,
       `${config.paths.internal}/manifests`, `${config.paths.internal}/source-maps`,
       `${config.paths.internal}/parse-staging`,
@@ -385,8 +399,8 @@ export class WikiService {
   }
 
   markNavigationIndexDirty(path?: string): void {
-    if (path && this.config) {
-      const prefix = `${normalizeVaultPath(this.config.paths.wiki).replace(/\/$/, "")}/`;
+    if (path) {
+      const prefix = `${normalizeVaultPath(this.config?.paths.wiki ?? DEFAULT_CONFIG.paths.wiki).replace(/\/$/, "")}/`;
       if (!normalizeVaultPath(path).startsWith(prefix)) return;
       this.dirtyWikiPaths.add(normalizeVaultPath(path));
     }
@@ -473,6 +487,302 @@ export class WikiService {
     return (await this.parsingService()).readVerifiedSource(sourceId);
   }
 
+  async readVerifiedSourceRevision(
+    sourceId: string,
+    revisionNumber: number
+  ): Promise<{ manifest: SourceManifest; content: string }> {
+    await this.ensureParsingFrameworkCurrent();
+    return (await this.parsingService()).readVerifiedSourceRevision(sourceId, revisionNumber);
+  }
+
+  async listEditableDocuments(): Promise<EditableDocumentView[]> {
+    const service = await this.editableDocumentService();
+    const views = await service.list();
+    if (views.length === 0) return views;
+
+    // Publication and Apply are intentionally separate durable commits. If the
+    // process stops between them, rebuild the small editable-document marker
+    // from the authoritative Manifest instead of asking the user to publish or
+    // absorb the same immutable snapshot again.
+    const manifests = await (await this.parsingService()).listSources();
+    const byDocument = new Map<string, SourceManifest[]>();
+    for (const manifest of manifests) {
+      const documentId = manifest.source.lineage?.documentId;
+      if (!documentId || manifest.parse.status !== "parsed") continue;
+      const items = byDocument.get(documentId) ?? [];
+      items.push(manifest);
+      byDocument.set(documentId, items);
+    }
+
+    const reconciled: EditableDocumentView[] = [];
+    for (const originalView of views) {
+      let view = originalView;
+      const candidates = (byDocument.get(view.record.documentId) ?? [])
+        .filter((manifest) => (manifest.source.lineage?.snapshotContentHash ?? manifest.sourceHash) === view.currentHash)
+        .sort((left, right) => right.original.importedAt.localeCompare(left.original.importedAt));
+      const manifest = candidates[0];
+      const revision = manifest?.parse.revisions.find((item) =>
+        item.revision === manifest.parse.currentRevision
+      );
+      if (manifest && revision
+        && (view.record.lastPublished?.sourceId !== manifest.sourceId
+          || view.record.lastPublished.contentHash !== view.currentHash)) {
+        view = await service.commitPublished(view.record.documentId, view.currentHash!, {
+          sourceId: manifest.sourceId,
+          sourceHash: manifest.sourceHash,
+          rawPath: revision.rawPath
+        });
+      }
+      const absorbedAttempt = manifest?.ingest.attempts
+        .filter((attempt) => attempt.status === "ingested" && Boolean(attempt.operationId))
+        .sort((left, right) => (right.completedAt ?? right.startedAt)
+          .localeCompare(left.completedAt ?? left.startedAt))[0];
+      if (manifest && absorbedAttempt?.operationId && view.currentHash
+        && view.record.lastPublished?.sourceId === manifest.sourceId
+        && view.record.lastAbsorbed?.contentHash !== view.currentHash) {
+        await service.markAbsorbed(view.record.documentId, view.currentHash, absorbedAttempt.operationId);
+        view = await service.get(view.record.documentId);
+      }
+      reconciled.push({
+        ...view,
+        publicationCount: byDocument.get(view.record.documentId)?.length ?? 0,
+        baseChanged: Boolean(view.record.base && manifests.some((source) =>
+          source.sourceId === view.record.base!.sourceId
+          && source.parse.currentRevision !== view.record.base!.parseRevision
+        ))
+      });
+    }
+    return reconciled;
+  }
+
+  async getEditableDocumentHistory(documentId: string): Promise<EditablePublicationHistoryItem[]> {
+    const manifests = await (await this.parsingService()).listSources();
+    return manifests
+      .filter((manifest) => manifest.source.lineage?.documentId === documentId
+        && manifest.parse.status === "parsed")
+      .map((manifest) => {
+        const revision = manifest.parse.revisions.find((item) => item.revision === manifest.parse.currentRevision)!;
+        const operationId = [...manifest.ingest.attempts].reverse()
+          .find((attempt) => attempt.status === "ingested" && attempt.operationId)?.operationId;
+        return {
+          sourceId: manifest.sourceId,
+          sourceHash: manifest.sourceHash,
+          snapshotContentHash: manifest.source.lineage?.snapshotContentHash ?? manifest.sourceHash,
+          rawPath: revision.rawPath,
+          publishedAt: manifest.original.importedAt,
+          ingestStatus: manifest.ingest.status,
+          ...(operationId ? { operationId } : {}),
+          assetCount: revision.assets?.length ?? 0
+        };
+      })
+      .sort((left, right) => left.publishedAt.localeCompare(right.publishedAt));
+  }
+
+  async deleteEditableDraft(documentId: string): Promise<void> {
+    const service = await this.editableDocumentService();
+    const view = await service.get(documentId);
+    const config = await this.loadConfig();
+    const targets = [
+      view.record.path,
+      `${normalizeVaultPath(config.paths.notes)}/assets/${documentId}`
+    ];
+    for (const path of targets) {
+      const target = this.vault.getAbstractFileByPath(path);
+      if (target instanceof TFile || target instanceof TFolder) await this.app.fileManager.trashFile(target);
+    }
+    await service.forget(documentId);
+  }
+
+  async previewEditableHistoryDeletion(documentId: string): Promise<{
+    sourceIds: string[];
+    blockers: Array<{ sourceId: string; reason: string }>;
+  }> {
+    const state = await this.editableHistoryDeletionState(documentId);
+    return {
+      sourceIds: state.history.map((item) => item.sourceId),
+      blockers: state.blockers.map((item) => ({ sourceId: item.sourceId, reason: item.reason }))
+    };
+  }
+
+  async deleteEditableHistory(documentId: string): Promise<number> {
+    const state = await this.editableHistoryDeletionState(documentId);
+    if (state.blockers.length > 0) {
+      throw new Error(`删除历史被阻止：${state.blockers.map((item) => item.reason).join("；")}`);
+    }
+    // Roll back the whole publication chain first. A receipt shared by two
+    // snapshots from this same document is valid here even though neither
+    // snapshot could be deleted safely in isolation.
+    for (const receipt of state.receipts) await this.rollbackOperation(receipt.operationId);
+    let deleted = 0;
+    for (const item of [...state.history].reverse()) {
+      await this.deleteSource(item.sourceId);
+      deleted += 1;
+    }
+    for (const receiptPath of state.receiptPaths) {
+      if (await this.adapter.exists(receiptPath)) await this.adapter.remove(receiptPath);
+    }
+    return deleted;
+  }
+
+  async diffEditablePublication(
+    documentId: string,
+    beforeSourceId: string,
+    afterSourceId?: string
+  ): Promise<TextDiff> {
+    const history = await this.getEditableDocumentHistory(documentId);
+    const beforeItem = history.find((item) => item.sourceId === beforeSourceId);
+    if (!beforeItem) throw new Error("历史快照不存在或不属于该笔记");
+    const before = await this.readVerifiedSource(beforeSourceId);
+    const beforeRevision = before.manifest.parse.revisions.find((item) =>
+      item.revision === before.manifest.parse.currentRevision
+    )!;
+    let afterMarkdown: string;
+    let afterAssets: Array<{ assetId: string; hash: string }>;
+    if (afterSourceId) {
+      const afterItem = history.find((item) => item.sourceId === afterSourceId);
+      if (!afterItem) throw new Error("比较快照不存在或不属于该笔记");
+      const after = await this.readVerifiedSource(afterSourceId);
+      const afterRevision = after.manifest.parse.revisions.find((item) =>
+        item.revision === after.manifest.parse.currentRevision
+      )!;
+      afterMarkdown = normalizePublishedAssetReferences(after.content);
+      afterAssets = (afterRevision.assets ?? []).map((asset) => ({ assetId: asset.assetId, hash: asset.hash }));
+    } else {
+      const current = await (await this.editableDocumentService()).currentSnapshot(documentId);
+      afterMarkdown = current.canonicalMarkdown;
+      afterAssets = current.assets;
+    }
+    const diff = computeTextDiff(normalizePublishedAssetReferences(before.content), afterMarkdown);
+    return {
+      ...diff,
+      assetChanges: compareAssetSets(
+        (beforeRevision.assets ?? []).map((asset) => ({ assetId: asset.assetId, hash: asset.hash })),
+        afterAssets
+      )
+    };
+  }
+
+  async createEditableNote(title: string): Promise<EditableDocumentView> {
+    return (await this.editableDocumentService()).createNote(title);
+  }
+
+  async createRawRevisionDraft(
+    sourceId: string,
+    mode: EditableRevisionMode = "correction"
+  ): Promise<EditableDocumentView> {
+    const { manifest, content } = await this.readVerifiedSource(sourceId);
+    const title = metadataTitle(manifest) || manifest.original.name.replace(/\.[^.]+$/, "");
+    return (await this.editableDocumentService()).createRawRevision(
+      title,
+      currentRawBase(manifest),
+      content,
+      mode
+    );
+  }
+
+  async diffEditableDocument(documentId: string): Promise<TextDiff> {
+    const service = await this.editableDocumentService();
+    const view = await service.get(documentId);
+    if (!view.record.base) throw new Error("只有 Raw 修订稿可以与 Base 比较");
+    const { content } = await this.readVerifiedSourceRevision(
+      view.record.base.sourceId,
+      view.record.base.parseRevision
+    );
+    return service.diffFromBase(documentId, content);
+  }
+
+  async previewEditableRebase(documentId: string): Promise<EditableRebasePreview> {
+    const service = await this.editableDocumentService();
+    const view = await service.get(documentId);
+    if (!view.record.base) throw new Error("只有 Raw 修订稿可以 Rebase");
+    const manifest = await this.getSource(view.record.base.sourceId);
+    if (manifest.parse.currentRevision === view.record.base.parseRevision) {
+      throw new Error("原 Raw 没有新版本，无需 Rebase");
+    }
+    const { content } = await this.readVerifiedSource(manifest.sourceId);
+    return service.previewRebase(documentId, currentRawBase(manifest), content);
+  }
+
+  async applyEditableRebase(
+    preview: EditableRebasePreview,
+    resolutions: Record<string, "user" | "upstream">
+  ): Promise<EditableDocumentView> {
+    const manifest = await this.getSource(preview.newBase.sourceId);
+    if (manifest.parse.currentRevision !== preview.newBase.parseRevision) {
+      throw new Error("Rebase 期间 Raw 又产生了新版本，请重新预览");
+    }
+    const { content } = await this.readVerifiedSource(manifest.sourceId);
+    return (await this.editableDocumentService()).applyRebase(preview, content, resolutions);
+  }
+
+  async publishEditableDocument(documentId: string): Promise<{
+    view: EditableDocumentView;
+    manifest: SourceManifest;
+    duplicate: boolean;
+  }> {
+    const service = await this.editableDocumentService();
+    const before = await service.get(documentId);
+    if ((before.status === "published" || before.status === "absorbed") && before.record.lastPublished) {
+      return {
+        view: before,
+        manifest: await this.getSource(before.record.lastPublished.sourceId),
+        duplicate: true
+      };
+    }
+    let baseBody: string | undefined;
+    if (before.record.base) {
+      const baseManifest = await this.getSource(before.record.base.sourceId);
+      if (baseManifest.parse.currentRevision !== before.record.base.parseRevision) {
+        throw new Error("原 Raw 已产生新解析版本，请重新创建修订稿（RAW_REVISION_BASE_CHANGED）");
+      }
+      baseBody = (await this.readVerifiedSourceRevision(
+        before.record.base.sourceId,
+        before.record.base.parseRevision
+      )).content;
+    }
+    const prepared = await service.preparePublication(documentId, baseBody);
+    const imported = await this.importSourceDetailed(
+      prepared.name,
+      prepared.bytes,
+      prepared.provenance
+    );
+    const revision = imported.manifest.parse.revisions.find((item) =>
+      item.revision === imported.manifest.parse.currentRevision
+    );
+    if (imported.manifest.parse.status !== "parsed" || !revision) {
+      throw new Error(`文稿快照解析未完成：${imported.manifest.parse.status}`);
+    }
+    const view = await service.commitPublished(documentId, prepared.contentHash, {
+      sourceId: imported.manifest.sourceId,
+      sourceHash: imported.manifest.sourceHash,
+      rawPath: revision.rawPath
+    });
+    return { view, manifest: imported.manifest, duplicate: imported.duplicate };
+  }
+
+  async markEditableDocumentAbsorbed(sourceId: string, operationId: string): Promise<void> {
+    const manifest = await this.getSource(sourceId);
+    const lineage = manifest.source.lineage;
+    if (!lineage) return;
+    const service = await this.editableDocumentService();
+    const view = await service.get(lineage.documentId);
+    const published = view.record.lastPublished;
+    if (!published || published.sourceId !== sourceId) return;
+    await service.markAbsorbed(lineage.documentId, published.contentHash, operationId);
+  }
+
+  async handleEditableDocumentRename(oldPath: string, newPath: string): Promise<void> {
+    if (!(await this.isInitialized())) return;
+    if (!this.isEditableDocumentPath(oldPath) && !this.isEditableDocumentPath(newPath)) return;
+    await (await this.editableDocumentService()).handleRename(oldPath, newPath);
+  }
+
+  async handleEditableDocumentDelete(path: string): Promise<void> {
+    if (!(await this.isInitialized())) return;
+    if (!this.isEditableDocumentPath(path)) return;
+    await (await this.editableDocumentService()).handleDelete(path);
+  }
+
   async writeAgentRunAudit(record: Record<string, unknown>): Promise<void> {
     const config = await this.loadConfig();
     const sessionId = String(record.sessionId ?? "");
@@ -540,6 +850,29 @@ export class WikiService {
 
   dispose(): void {
     this.parsing?.dispose();
+  }
+
+  private async editableDocumentService(): Promise<EditableDocumentService> {
+    if (this.editableDocumentsFacade) return this.editableDocumentsFacade;
+    const config = await this.loadConfig();
+    this.editableDocumentsFacade = new EditableDocumentService(
+      this.vault,
+      this.adapter,
+      config,
+      {
+        resolve: (linkPath, sourcePath) => {
+          const target = this.app.metadataCache.getFirstLinkpathDest(linkPath, sourcePath);
+          return target instanceof TFile ? target.path : undefined;
+        }
+      }
+    );
+    await this.editableDocumentsFacade.initialize();
+    return this.editableDocumentsFacade;
+  }
+
+  private isEditableDocumentPath(path: string): boolean {
+    const root = normalizeVaultPath(this.config?.paths.notes ?? DEFAULT_CONFIG.paths.notes).replace(/\/$/, "");
+    return normalizeVaultPath(path).startsWith(`${root}/`);
   }
 
   async updateParsingProvider(
@@ -1177,6 +1510,94 @@ export class WikiService {
     return conflicts;
   }
 
+  private async editableHistoryDeletionState(documentId: string): Promise<{
+    history: EditablePublicationHistoryItem[];
+    receipts: RollbackReceipt[];
+    receiptPaths: string[];
+    blockers: Array<{ sourceId: string; path?: string; reason: string }>;
+  }> {
+    const history = await this.getEditableDocumentHistory(documentId);
+    const sourceIds = new Set(history.map((item) => item.sourceId));
+    const receiptByOperation = new Map<string, RollbackReceipt>();
+    const receiptPaths = new Set<string>();
+    const blockers: Array<{ sourceId: string; path?: string; reason: string }> = [];
+    for (const item of history) {
+      const manifest = await this.getSource(item.sourceId);
+      if (manifest.parse.status === "parsing") {
+        blockers.push({ sourceId: item.sourceId, reason: "该来源正在解析，请先等待解析结束或取消任务" });
+      }
+      const operationIds = [...new Set(manifest.ingest.attempts
+        .filter((attempt) => attempt.status === "ingested" && attempt.operationId)
+        .map((attempt) => attempt.operationId!))];
+      for (const operationId of operationIds) {
+        if (receiptByOperation.has(operationId)) continue;
+        const path = await this.rollbackReceiptPath(operationId);
+        receiptPaths.add(path);
+        if (!(await this.adapter.exists(path))) {
+          blockers.push({ sourceId: item.sourceId, reason: `Ingest ${operationId} 没有回滚快照` });
+          continue;
+        }
+        try {
+          const receipt = await this.hydrateReceipt(
+            this.parseRollbackReceipt(await this.adapter.read(path), operationId)
+          );
+          const scopeIssues = validateReceiptSourceScope(receipt, sourceIds);
+          if (scopeIssues.length > 0) {
+            blockers.push({
+              sourceId: item.sourceId,
+              reason: scopeIssues[0]!.reason
+            });
+            continue;
+          }
+          if (receipt.status === "applied") receiptByOperation.set(operationId, receipt);
+        } catch (error) {
+          blockers.push({
+            sourceId: item.sourceId,
+            reason: `Ingest ${operationId} 回滚快照无效：${error instanceof Error ? error.message : String(error)}`
+          });
+        }
+      }
+    }
+    const receipts = [...receiptByOperation.values()]
+      .sort((left, right) => right.appliedAt.localeCompare(left.appliedAt));
+    const chainSourceId = history.at(-1)?.sourceId ?? documentId;
+    for (const conflict of await this.sourceDeletionConflicts(receipts)) {
+      blockers.push({ sourceId: chainSourceId, ...conflict });
+    }
+    if (blockers.length === 0 && receipts.length > 0) {
+      const finalContents = new Map<string, string | null>();
+      const affected = new Set<string>();
+      for (const receipt of receipts) {
+        for (const change of receipt.changes) {
+          affected.add(change.path);
+          finalContents.set(change.path, change.before ?? null);
+        }
+      }
+      const deletedTargets = new Set([...finalContents.entries()]
+        .filter(([, content]) => content === null)
+        .map(([path]) => normalizeVaultPath(path).replace(/\.md$/i, "")));
+      for (const page of await this.readPages()) {
+        if (affected.has(page.path)) continue;
+        const dangling = page.links.find((link) => deletedTargets.has(
+          normalizeVaultPath(link).replace(/\.md$/i, "")
+        ));
+        if (dangling) {
+          blockers.push({
+            sourceId: chainSourceId,
+            path: page.path,
+            reason: `其他 Wiki 页面仍引用将删除的页面：${dangling}`
+          });
+        }
+      }
+    }
+    return {
+      history,
+      receipts,
+      receiptPaths: [...receiptPaths],
+      blockers: uniqueHistoryDeletionBlockers(blockers)
+    };
+  }
+
   private async sourceDeletionConflicts(receipts: RollbackReceipt[]): Promise<Array<{ path?: string; reason: string }>> {
     const simulated = new Map<string, string | undefined>();
     for (const receipt of receipts) {
@@ -1550,6 +1971,48 @@ function isSourceManagedPath(path: string, config: WikiConfig, sourceId: string)
     || normalized.startsWith(`${internal}/agent-runs/`);
 }
 
+function metadataTitle(manifest: SourceManifest): string | undefined {
+  const value = manifest.source.metadata?.title
+    ?? manifest.parse.revisions.find((item) => item.revision === manifest.parse.currentRevision)?.metadata.title;
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function uniqueHistoryDeletionBlockers(
+  blockers: Array<{ sourceId: string; path?: string; reason: string }>
+): Array<{ sourceId: string; path?: string; reason: string }> {
+  const seen = new Set<string>();
+  return blockers.filter((item) => {
+    const key = `${item.sourceId}\u0000${item.path ?? ""}\u0000${item.reason}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizePublishedAssetReferences(markdown: string): string {
+  return markdown.replace(
+    /((?:\.\.\/)+assets\/[a-zA-Z0-9-]+\/)([a-zA-Z0-9_-]+)\.(?:png|jpe?g|webp|gif|svg)/g,
+    (_match, _prefix: string, assetId: string) => `llm-wiki-asset:${assetId}`
+  );
+}
+
+function compareAssetSets(
+  before: Array<{ assetId: string; hash: string }>,
+  after: Array<{ assetId: string; hash: string }>
+): { added: number; removed: number; changed: number } {
+  const beforeMap = new Map(before.map((asset) => [asset.assetId, asset.hash]));
+  const afterMap = new Map(after.map((asset) => [asset.assetId, asset.hash]));
+  let added = 0;
+  let removed = 0;
+  let changed = 0;
+  for (const [assetId, hash] of afterMap) {
+    if (!beforeMap.has(assetId)) added += 1;
+    else if (beforeMap.get(assetId) !== hash) changed += 1;
+  }
+  for (const assetId of beforeMap.keys()) if (!afterMap.has(assetId)) removed += 1;
+  return { added, removed, changed };
+}
+
 function renderClaudeMd(config: WikiConfig): string {
   return `# ${config.name} — Agent 规则
 
@@ -1558,6 +2021,7 @@ function renderClaudeMd(config: WikiConfig): string {
 ## 不可违反的边界
 
 - \`raw/\` 是由插件发布的不可变规范 Markdown；原件保存在 \`${config.paths.internal}/objects/\`。新产物正文保持干净，不插入 block/page marker；\`${config.paths.internal}/source-maps/\` 仅用于兼容已有历史产物。
+- \`${config.paths.notes}/\` 是用户拥有的可编辑工作区；只有用户明确“发布快照”后，插件才会生成新的不可变 Raw 来源。
 - \`wiki/\` 页面必须符合 \`llm-wiki.config.json\` 与 templates 中的 Schema。
 - 所有写入由 LLM Wiki 插件审阅和执行；Agent 应返回结构化变更计划，不直接写文件。
 - 新页面使用 kebab-case 文件名并维护 Obsidian 双链。
@@ -1565,7 +2029,7 @@ function renderClaudeMd(config: WikiConfig): string {
 
 ## 数据流
 
-Human 导入原件 → Parser Provider → Markdown 标准化 → raw/**/*.md → Agent 分析 → WikiChangePlan → 插件校验与 Diff → wiki/ → index.md/log.md
+Human 导入原件或编写笔记/修订稿 → 发布不可变 Raw → Agent 分析 → WikiChangePlan → 插件校验与 Diff → wiki/ → index.md/log.md
 `;
 }
 

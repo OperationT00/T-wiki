@@ -4,6 +4,20 @@ All notable changes to T-Wiki are documented in this file.
 
 ## Unreleased
 
+## 0.1.5
+
+- Add a user-owned `notes/t-wiki/` workspace for blank notes and hash-bound Raw revision drafts.
+- Publish explicit immutable note snapshots without running an Agent, or continue through the existing Ingest and Diff review flow.
+- Preserve editable-document lineage across Manifest revisions so repeated publications update one stable Source page.
+- Copy Raw assets and local note images into content-addressed immutable publication bundles.
+- Resolve editable titles from frontmatter, first H1, filename, and creation fallback.
+- Compare arbitrary publication versions and rebase Raw revisions with a deterministic three-way merge and explicit conflict choices.
+- Limit repeat Ingest runs to changed sections plus neighboring context when a verified absorbed predecessor is available.
+- Persist host-authored supplement, correction, and rewrite provenance alongside verified claim-to-quote Evidence.
+- Add preflighted deletion for individual snapshots and full publication history, while moving mutable drafts to the system trash independently.
+- Reconcile published and absorbed document status from durable Manifests after an interrupted process.
+
+
 ## 0.1.2
 
 - Address Obsidian community-review findings by scoping Vault enumeration, using supported settings and lifecycle APIs, removing browser prompt/confirm calls, and documenting desktop capability boundaries.

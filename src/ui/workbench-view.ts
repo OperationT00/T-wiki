@@ -20,15 +20,20 @@ import type {
 } from "../types";
 import {
   DeleteSourceModal,
+  EditableDiffModal,
+  EditableHistoryModal,
+  EditableRebaseModal,
   InitializeModal,
   ReviewModal,
   RollbackModal,
   UrlCaptureModal,
+  chooseRevisionMode,
   confirmAction,
   requestText,
   summarizePlan
 } from "./modals";
 import { sourcePipelineSteps } from "./pipeline-model";
+import type { EditableDocumentView } from "../editable-documents/types";
 
 export const VIEW_TYPE_LLM_WIKI = "llm-wiki-workbench";
 
@@ -127,9 +132,10 @@ export class WorkbenchView extends ItemView {
     await this.ensureProgressSubscription();
 
     const tabs = root.createDiv({ cls: "llm-wiki-tabs" });
-    const definitions: Array<{ id: "home" | "materials" | "smart" | "review"; label: string }> = [
+    const definitions: Array<{ id: "home" | "materials" | "notes" | "smart" | "review"; label: string }> = [
       { id: "home", label: "首页" },
       { id: "materials", label: "素材" },
+      { id: "notes", label: "笔记" },
       { id: "smart", label: "智能" },
       { id: "review", label: "审阅" }
     ];
@@ -150,6 +156,7 @@ export class WorkbenchView extends ItemView {
     const panel = root.createDiv({ cls: "llm-wiki-panel" });
     if (this.plugin.settings.activeTab === "home") await this.renderHome(panel);
     if (this.plugin.settings.activeTab === "materials") await this.renderMaterials(panel);
+    if (this.plugin.settings.activeTab === "notes") await this.renderNotes(panel);
     if (this.plugin.settings.activeTab === "agent" || this.plugin.settings.activeTab === "query") {
       await this.renderSmart(panel);
     }
@@ -326,6 +333,170 @@ export class WorkbenchView extends ItemView {
     for (const source of sources) this.renderSource(panel, source, mineruEnabled, mediaProvider);
   }
 
+  private async renderNotes(panel: HTMLElement): Promise<void> {
+    const toolbar = panel.createDiv({ cls: "llm-wiki-card llm-wiki-material-toolbar" });
+    const actions = toolbar.createDiv({ cls: "llm-wiki-material-action-group llm-wiki-material-action-group-primary" });
+    action(actions, "新建笔记", async () => {
+      const title = await requestText(
+        this.app,
+        "新建 T-Wiki 笔记",
+        "笔记保存在可编辑工作区，只有明确发布后才会生成 Raw 快照。",
+        "",
+        false,
+        "笔记标题"
+      );
+      if (!title?.trim()) return;
+      try {
+        const view = await this.plugin.wiki.createEditableNote(title);
+        await this.openVaultFileExact(view.record.path);
+        await this.render();
+      } catch (error) {
+        new Notice(`创建笔记失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    toolbar.createEl("p", {
+      text: "笔记和 Raw 修订稿可自由编辑；发布时生成不可变来源快照，沉淀时继续使用现有 Evidence、Diff 和事务流程。",
+      cls: "llm-wiki-muted"
+    });
+
+    const documents = await this.plugin.wiki.listEditableDocuments();
+    if (documents.length === 0) {
+      const empty = panel.createDiv({ cls: "llm-wiki-card" });
+      empty.createEl("h3", { text: "还没有可编辑文稿" });
+      empty.createEl("p", {
+        text: "可以新建空白笔记，或在素材页选择“创建修订稿”从已验证 Raw 开始修改。",
+        cls: "llm-wiki-muted"
+      });
+      return;
+    }
+    for (const view of documents.sort((left, right) =>
+      right.record.createdAt.localeCompare(left.record.createdAt))) {
+      this.renderEditableDocument(panel, view);
+    }
+  }
+
+  private renderEditableDocument(panel: HTMLElement, view: EditableDocumentView): void {
+    const card = panel.createDiv({ cls: "llm-wiki-card llm-wiki-editable-card" });
+    const heading = card.createDiv({ cls: "llm-wiki-source-heading" });
+    heading.createEl("h3", { text: view.title ?? view.record.title });
+    heading.createSpan({
+      text: editableStatusLabel(view.status),
+      cls: `llm-wiki-note-status is-${view.status}`
+    });
+    card.createEl("p", {
+      text: `${view.record.kind === "note" ? "用户笔记" : `Raw 修订 · ${revisionModeLabel(view.record.mode)}`} · ${view.record.path}`,
+      cls: "llm-wiki-muted"
+    });
+    if (view.record.base) {
+      card.createEl("p", {
+        text: `Base：${view.record.base.rawPath} · r${view.record.base.parseRevision} · ${view.record.base.contentHash.slice(0, 12)}`,
+        cls: "llm-wiki-muted"
+      });
+      if (view.baseChanged) {
+        card.createEl("p", {
+          text: "原 Raw 已产生新版本，当前修订稿需要 Rebase 后才能发布。",
+          cls: "llm-wiki-warning"
+        });
+      }
+    }
+    if ((view.publicationCount ?? 0) > 0) {
+      card.createEl("p", {
+        text: `已发布 ${view.publicationCount} 个不可变快照${view.record.lastPublished
+          ? ` · 最近发布 ${new Date(view.record.lastPublished.publishedAt).toLocaleString()}`
+          : ""}`,
+        cls: "llm-wiki-muted"
+      });
+    }
+    const actions = card.createDiv({ cls: "llm-wiki-actions" });
+    action(actions, "打开编辑", async () => this.openVaultFileExact(view.record.path));
+    if ((view.publicationCount ?? 0) > 0) {
+      action(actions, "发布历史", () => new EditableHistoryModal(this.plugin, view).open());
+    }
+    if (view.baseChanged) {
+      action(actions, "Rebase 到最新 Raw", async () => {
+        try {
+          const preview = await this.plugin.wiki.previewEditableRebase(view.record.documentId);
+          new EditableRebaseModal(this.plugin, preview).open();
+        } catch (error) {
+          new Notice(`Rebase 预览失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    }
+    if (view.record.kind === "raw_revision" && view.status !== "missing") {
+      action(actions, "查看 Diff", async () => {
+        try {
+          const diff = await this.plugin.wiki.diffEditableDocument(view.record.documentId);
+          new EditableDiffModal(this.app, `${view.title ?? view.record.title} · 原文差异`, diff).open();
+        } catch (error) {
+          new Notice(`Diff 失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    }
+    if (view.status === "missing") return;
+    if (!view.baseChanged && (view.status === "draft" || view.status === "dirty")) {
+      action(actions, "发布快照", async () => this.reviewAndPublishEditable(view, false));
+      action(actions, "发布并沉淀", async () => this.reviewAndPublishEditable(view, true));
+    } else if (view.status === "published") {
+      action(actions, "开始沉淀", async () => this.reviewAndPublishEditable(view, true));
+    }
+    action(actions, "删除编辑稿", async () => {
+      const historyNote = (view.publicationCount ?? 0) > 0
+        ? ` 已发布的 ${view.publicationCount} 个不可变快照不会被删除，可在“发布历史”中单独管理。`
+        : "";
+      const confirmed = await confirmAction(
+        this.app,
+        "删除编辑稿",
+        `将把可编辑 Markdown 和其工作区附件移入系统回收站。${historyNote}`,
+        "删除编辑稿",
+        true
+      );
+      if (!confirmed) return;
+      try {
+        await this.plugin.wiki.deleteEditableDraft(view.record.documentId);
+        new Notice("编辑稿已移入回收站；不可变发布快照保持不变");
+        await this.render();
+      } catch (error) {
+        new Notice(`删除编辑稿失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  }
+
+  private async reviewAndPublishEditable(view: EditableDocumentView, absorb: boolean): Promise<void> {
+    const execute = async (): Promise<void> => {
+      if (absorb) {
+        const plan = await this.plugin.workflows.absorbEditableDocument(view.record.documentId, () => undefined);
+        await this.render();
+        new ReviewModal(this.plugin, plan).open();
+      } else {
+        await this.plugin.wiki.publishEditableDocument(view.record.documentId);
+        new Notice("文稿快照已发布；原编辑文件和历史 Raw 均保持不变");
+        await this.render();
+      }
+    };
+    if (view.record.kind === "raw_revision" && (view.status === "draft" || view.status === "dirty")) {
+      try {
+        const diff = await this.plugin.wiki.diffEditableDocument(view.record.documentId);
+        new EditableDiffModal(this.app, `${view.title ?? view.record.title} · 确认发布`, diff, execute).open();
+      } catch (error) {
+        new Notice(`无法审阅修订：${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+    if (!await confirmAction(
+      this.app,
+      absorb ? "发布并沉淀笔记" : "发布笔记快照",
+      absorb
+        ? "将当前笔记保存为不可变 Raw 快照，并启动 Ingest 生成待审核 Wiki 变更。"
+        : "将当前笔记保存为不可变 Raw 快照；不会自动调用 Agent。",
+      absorb ? "发布并沉淀" : "发布"
+    )) return;
+    try {
+      await execute();
+    } catch (error) {
+      new Notice(`文稿处理失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private renderSource(
     panel: HTMLElement,
     source: SourceManifest,
@@ -358,7 +529,14 @@ export class WorkbenchView extends ItemView {
         cls: `llm-wiki-parser-badge ${parserBadgeClass(parserId)}`
       });
     }
-    if (source.source.acquiredBy === "obsidian-web-clipper") {
+    if (source.source.lineage?.type === "user-note") {
+      card.createEl("p", { text: "来源：用户笔记发布快照", cls: "llm-wiki-muted" });
+    } else if (source.source.lineage?.type === "user-revision") {
+      card.createEl("p", {
+        text: `来源：Raw ${revisionModeLabel(source.source.lineage.mode)}修订快照`,
+        cls: "llm-wiki-muted"
+      });
+    } else if (source.source.acquiredBy === "obsidian-web-clipper") {
       card.createEl("p", { text: "来源：Obsidian Web Clipper", cls: "llm-wiki-muted" });
     } else if (source.source.acquiredBy === "url-capture") {
       card.createEl("p", { text: "来源：网页直接抓取", cls: "llm-wiki-muted" });
@@ -607,6 +785,25 @@ export class WorkbenchView extends ItemView {
         text: "等待转写：请在 T-Wiki 设置的“音视频解析”中开启“启用远程转写”并保存。",
         cls: "llm-wiki-warning"
       });
+    }
+    if (source.parse.status === "parsed" && !source.source.lineage) {
+      const revise = card.createEl("button", { text: "创建修订稿" });
+      revise.onclick = async () => {
+        revise.disabled = true;
+        try {
+          const mode = await chooseRevisionMode(this.app);
+          if (!mode) return;
+          const view = await this.plugin.wiki.createRawRevisionDraft(source.sourceId, mode);
+          this.plugin.settings.activeTab = "notes";
+          await this.plugin.saveSettings();
+          await this.openVaultFileExact(view.record.path);
+          await this.render();
+        } catch (error) {
+          new Notice(`创建修订稿失败：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          revise.disabled = false;
+        }
+      };
     }
     if (source.parse.status === "parsed"
       && (source.ingest.status === "not_started" || source.ingest.status === "ingest_failed")) {
@@ -1418,6 +1615,20 @@ function formatMediaDuration(durationMs: number): string {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function editableStatusLabel(status: EditableDocumentView["status"]): string {
+  return {
+    missing: "文件缺失",
+    draft: "草稿",
+    dirty: "有未发布修改",
+    published: "已发布，待沉淀",
+    absorbed: "已沉淀"
+  }[status];
+}
+
+function revisionModeLabel(mode: EditableDocumentView["record"]["mode"]): string {
+  return mode === "supplement" ? "补充" : mode === "rewrite" ? "改写" : "纠正";
 }
 
 interface RunMonitor {

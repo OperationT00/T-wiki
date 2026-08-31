@@ -14,6 +14,9 @@ export interface IntakeProvenance {
   acquiredBy?: string;
   metadata?: SourceMetadata;
   capture?: SourceManifest["source"]["capture"];
+  lineage?: SourceManifest["source"]["lineage"];
+  /** Keep content-addressed object dedupe but create a distinct Manifest identity. */
+  deduplicateManifest?: boolean;
   /** Keep the immutable source queued until the UI grants remote processing consent. */
   deferParse?: boolean;
 }
@@ -53,7 +56,9 @@ export class IntakeService {
       );
     }
     const { hash: sourceHash, size } = await hashSource(source, limit);
-    const duplicate = await this.manifests.findByHash(sourceHash);
+    const duplicate = provenance.deduplicateManifest === false
+      ? null
+      : await this.manifests.findByHash(sourceHash);
     if (duplicate) {
       const safeUri = sanitizeSourceUri(provenance.uri);
       const safeRequestedUri = sanitizeSourceUri(provenance.requestedUri);
@@ -61,6 +66,7 @@ export class IntakeService {
         || (safeRequestedUri && !duplicate.source.requestedUri)
         || (provenance.capturedAt && !duplicate.source.capturedAt)
         || (provenance.capture && !duplicate.source.capture)
+        || (provenance.lineage && !duplicate.source.lineage)
         || (provenance.metadata && !duplicate.source.metadata)
         || (provenance.kind && duplicate.source.kind === "unknown")) {
         const updated = await this.manifests.update(
@@ -79,6 +85,9 @@ export class IntakeService {
             }
             if (provenance.capture && !current.source.capture) {
               current.source.capture = structuredClone(provenance.capture);
+            }
+            if (provenance.lineage && !current.source.lineage) {
+              current.source.lineage = structuredClone(provenance.lineage);
             }
             if (provenance.metadata && !current.source.metadata) {
               current.source.metadata = structuredClone(provenance.metadata);
@@ -106,7 +115,8 @@ export class IntakeService {
         capturedAt: provenance.capturedAt,
         acquiredBy: provenance.acquiredBy ?? "file-picker",
         metadata: provenance.metadata ? structuredClone(provenance.metadata) : undefined,
-        capture: provenance.capture ? structuredClone(provenance.capture) : undefined
+        capture: provenance.capture ? structuredClone(provenance.capture) : undefined,
+        lineage: provenance.lineage ? structuredClone(provenance.lineage) : undefined
       },
       original: {
         name,

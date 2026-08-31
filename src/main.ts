@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Notice, Plugin, type DataAdapter, type WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile, type DataAdapter, type WorkspaceLeaf } from "obsidian";
 
 import {
   normalizePluginSettings,
@@ -34,7 +34,16 @@ import { FileSystemMediaJobStore } from "./services/media-job-store";
 import { WikiService, type MigrationPreview } from "./services/wiki-service";
 import { WorkflowService } from "./services/workflow-service";
 import type { ChatSession, PluginSettings } from "./types";
-import { DeleteSourceModal, InitializeModal, RollbackModal, UrlCaptureModal } from "./ui/modals";
+import {
+  DeleteSourceModal,
+  EditableDiffModal,
+  InitializeModal,
+  ReviewModal,
+  RollbackModal,
+  UrlCaptureModal,
+  chooseRevisionMode,
+  requestText
+} from "./ui/modals";
 import { LLMWikiSettingTab } from "./ui/settings-tab";
 import { VIEW_TYPE_LLM_WIKI, WorkbenchView } from "./ui/workbench-view";
 
@@ -97,10 +106,18 @@ export default class LLMWikiPlugin extends Plugin {
     }));
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file.path.endsWith(".md")) this.wiki.markNavigationIndexDirty(file.path);
+      if (file.path.endsWith(".md")) {
+        void this.wiki.handleEditableDocumentDelete(file.path)
+          .catch((error) => new Notice(`笔记状态同步失败：${error instanceof Error ? error.message : String(error)}`));
+      }
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       if (file.path.endsWith(".md")) this.wiki.markNavigationIndexDirty(file.path);
       if (oldPath.endsWith(".md")) this.wiki.markNavigationIndexDirty(oldPath);
+      if (file.path.endsWith(".md") || oldPath.endsWith(".md")) {
+        void this.wiki.handleEditableDocumentRename(oldPath, file.path)
+          .catch((error) => new Notice(`笔记状态同步失败：${error instanceof Error ? error.message : String(error)}`));
+      }
     }));
     await this.filePicker.start(this.connectorContext());
     await this.webUrlCapture.start(this.connectorContext());
@@ -268,6 +285,12 @@ export default class LLMWikiPlugin extends Plugin {
     await this.app.workspace.revealLeaf(leaf);
   }
 
+  async openVaultPath(path: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error(`文件不存在：${path}`);
+    await this.app.workspace.getLeaf(false).openFile(file);
+  }
+
   async refreshView(): Promise<void> {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_LLM_WIKI)) {
       const view = leaf.view;
@@ -394,6 +417,85 @@ export default class LLMWikiPlugin extends Plugin {
         await this.saveSettings();
         await this.openWorkbench();
         await this.refreshView();
+      }
+    });
+    this.addCommand({
+      id: "new-editable-note",
+      name: "新建笔记",
+      callback: async () => {
+        if (!(await this.wiki.isInitialized())) {
+          new Notice("请先初始化 T-Wiki");
+          return;
+        }
+        const title = await requestText(
+          this.app,
+          "新建 T-Wiki 笔记",
+          "笔记可自由编辑，发布后才会进入 Raw 和 Ingest。",
+          "",
+          false,
+          "笔记标题"
+        );
+        if (!title?.trim()) return;
+        try {
+          const view = await this.wiki.createEditableNote(title);
+          await this.openVaultPath(view.record.path);
+        } catch (error) {
+          new Notice(`创建笔记失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    });
+    this.addCommand({
+      id: "create-revision-from-active-raw",
+      name: "基于当前 Raw 创建修订稿",
+      callback: async () => {
+        const active = this.app.workspace.getActiveFile();
+        if (!active) {
+          new Notice("请先打开一个 Raw Markdown");
+          return;
+        }
+        const source = (await this.wiki.listSources()).find((item) => item.parse.revisions.some((revision) =>
+          revision.rawPath === active.path
+        ));
+        if (!source) {
+          new Notice("当前文件不是受 T-Wiki 管理的 Raw");
+          return;
+        }
+        try {
+          const mode = await chooseRevisionMode(this.app);
+          if (!mode) return;
+          const view = await this.wiki.createRawRevisionDraft(source.sourceId, mode);
+          await this.openVaultPath(view.record.path);
+        } catch (error) {
+          new Notice(`创建修订稿失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    });
+    this.addCommand({
+      id: "absorb-active-editable-document",
+      name: "沉淀当前笔记或修订稿",
+      callback: async () => {
+        const active = this.app.workspace.getActiveFile();
+        const view = active
+          ? (await this.wiki.listEditableDocuments()).find((item) => item.record.path === active.path)
+          : undefined;
+        if (!view) {
+          new Notice("当前文件不是 T-Wiki 可编辑文稿");
+          return;
+        }
+        const absorb = async (): Promise<void> => {
+          const plan = await this.workflows.absorbEditableDocument(view.record.documentId, () => undefined);
+          new ReviewModal(this, plan).open();
+        };
+        try {
+          if (view.record.kind === "raw_revision" && (view.status === "draft" || view.status === "dirty")) {
+            const diff = await this.wiki.diffEditableDocument(view.record.documentId);
+            new EditableDiffModal(this.app, `${view.title ?? view.record.title} · 确认沉淀`, diff, absorb).open();
+          } else {
+            await absorb();
+          }
+        } catch (error) {
+          new Notice(`沉淀失败：${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     });
     this.addCommand({

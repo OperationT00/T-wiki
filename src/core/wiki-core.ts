@@ -57,6 +57,7 @@ export const DEFAULT_CONFIG: WikiConfig = {
   paths: {
     raw: "raw",
     wiki: "wiki",
+    notes: "notes/t-wiki",
     index: "index.md",
     log: "log.md",
     internal: ".llm-wiki"

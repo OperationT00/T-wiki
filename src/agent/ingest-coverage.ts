@@ -227,6 +227,15 @@ function validateDecision(
   if (!String(decision.title ?? "").trim()) throw new Error(`候选 ${decision.candidateId} title 不能为空`);
   if (!MODEL_DECISIONS.includes(decision.decision)) throw new Error(`模型不得提交决策：${decision.decision}`);
   if (!String(decision.reason ?? "").trim()) throw new Error(`候选 ${decision.candidateId} 缺少处理原因`);
+  if (decision.revisionContext) {
+    const expectedHandling = decision.revisionContext.mode === "supplement" ? "supplemented"
+      : decision.revisionContext.mode === "correction" ? "corrected"
+        : decision.revisionContext.mode === "rewrite" ? "rewritten" : undefined;
+    if (!expectedHandling || decision.revisionContext.handling !== expectedHandling
+      || decision.revisionContext.provenance !== "user-revision") {
+      throw new Error(`候选 ${decision.candidateId} 修订语义无效`);
+    }
+  }
   if (!Array.isArray(decision.evidence) || decision.evidence.length === 0) {
     throw new Error(`候选 ${decision.candidateId} 缺少 evidence`);
   }

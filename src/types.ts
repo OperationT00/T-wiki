@@ -14,6 +14,8 @@ export interface WikiConfig {
   paths: {
     raw: string;
     wiki: string;
+    /** User-owned mutable drafts. Content here is never treated as canonical Raw until explicitly published. */
+    notes: string;
     index: string;
     log: string;
     internal: string;
@@ -342,6 +344,17 @@ export interface SourceManifest {
       videoId?: string;
       durationMs?: number;
     };
+    /** Optional provenance for a snapshot published from the editable-document workspace. */
+    lineage?: {
+      type: "user-note" | "user-revision";
+      documentId: string;
+      /** Hash of the mutable Markdown at the instant this immutable snapshot was published. */
+      snapshotContentHash?: string;
+      mode?: "supplement" | "correction" | "rewrite";
+      baseSourceId?: string;
+      baseParseRevision?: number;
+      baseContentHash?: string;
+    };
   };
   original: {
     name: string;
@@ -377,6 +390,16 @@ export interface IngestInput {
   parserVersion: string;
   parseWarnings: ParseIssue[];
   metadata: SourceMetadata;
+  lineage?: SourceManifest["source"]["lineage"];
+  /** Host-computed delta against the latest absorbed snapshot of the same editable document. */
+  incremental?: {
+    previousSourceId: string;
+    previousContentHash: string;
+    changedSectionIds: string[];
+    contextSectionIds: string[];
+    unchangedSectionCount: number;
+    removedHeadings: string[];
+  };
 }
 
 export interface RawVerification {
@@ -467,6 +490,13 @@ export interface KnowledgeDecision {
   evidence: EvidenceReference[];
   /** Verified claim-to-passage bindings. Legacy plans may omit this field. */
   evidenceClaims?: EvidenceClaim[];
+  /** Host-authored provenance semantics for an editable Raw revision. */
+  revisionContext?: {
+    mode: "supplement" | "correction" | "rewrite";
+    baseSourceId?: string;
+    handling: "supplemented" | "corrected" | "rewritten";
+    provenance: "user-revision";
+  };
 }
 
 export interface IngestCoverageReport {
@@ -748,7 +778,7 @@ export interface PluginSettings {
     budgets: Record<AgentBudgetName, AgentBudget>;
     models: ModelProfile[];
   };
-  activeTab: "home" | "materials" | "agent" | "review" | "query";
+  activeTab: "home" | "materials" | "notes" | "agent" | "review" | "query";
   sessions: ChatSession[];
   activeSessionId: string;
   webClipper: {

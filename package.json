@@ -1,6 +1,6 @@
 {
   "name": "t-wiki-obsidian",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Compile source documents into a structured, traceable and interconnected Markdown wiki in Obsidian.",
   "author": "T00",
@@ -27,7 +27,7 @@
     "fflate": "^0.8.2",
     "jsonrepair": "^3.13.1",
     "openai": "^6.49.0",
-    "pdfjs-dist": "^5.4.530",
+    "pdfjs-dist": "5.4.530",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

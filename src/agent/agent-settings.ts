@@ -88,7 +88,7 @@ export function normalizePluginSettings(data: StoredPluginSettings | null | unde
       budgets: normalizeBudgets(agentInput?.budgets, Number(data?.schemaVersion) < 5),
       models: normalizeModels(agentInput?.models ?? legacyModels)
     },
-    activeTab: ["home", "materials", "agent", "review", "query"].includes(String(data?.activeTab))
+    activeTab: ["home", "materials", "notes", "agent", "review", "query"].includes(String(data?.activeTab))
       ? data!.activeTab!
       : defaults.activeTab,
     sessions: Array.isArray(data?.sessions) ? data.sessions.slice(0, 20) : [],

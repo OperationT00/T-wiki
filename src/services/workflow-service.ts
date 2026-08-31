@@ -91,6 +91,16 @@ export class WorkflowService {
     return this.ingestBatch([manifest], sink, options);
   }
 
+  async absorbEditableDocument(
+    documentId: string,
+    sink: EventSink,
+    options: { discuss?: boolean; requestDirection?: ToolExecutionContext["requestDirection"] } = {}
+  ): Promise<WikiChangePlan> {
+    this.assertNoPending();
+    const published = await this.wiki.publishEditableDocument(documentId);
+    return this.ingest(published.manifest, sink, options);
+  }
+
   async ingestBatch(
     manifests: SourceManifest[],
     sink: EventSink,
@@ -311,6 +321,10 @@ export class WorkflowService {
           hasUserExclusions: hasUserExclusions(coverageForSource(plan.ingestCoverage, attempt.sourceId))
         }
       );
+      if (sourceOperation && typeof this.wiki.markEditableDocumentAbsorbed === "function") {
+        await this.wiki.markEditableDocumentAbsorbed(attempt.sourceId, plan.operationId)
+          .catch(() => undefined);
+      }
     }
     if (pending?.progressRunId) {
       if (completedSourceIds.length > 0) this.ingestProgress.markCompleted(pending.progressRunId, completedSourceIds);

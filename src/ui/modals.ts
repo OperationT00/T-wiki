@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, type App } from "obsidian";
+import { Modal, Notice, Setting, TFile, type App } from "obsidian";
 
 import { DEFAULT_CONFIG, sha256 } from "../core/wiki-core";
 import { isBilibiliUrl } from "../connectors/bilibili-video-connector";
@@ -12,6 +12,14 @@ import type {
   WikiConfig
 } from "../types";
 import type LLMWikiPlugin from "../main";
+import { computeTextDiff, renderUnifiedDiff } from "../editable-documents/text-diff";
+import type {
+  EditableDocumentView,
+  EditablePublicationHistoryItem,
+  EditableRebasePreview,
+  EditableRevisionMode,
+  TextDiff
+} from "../editable-documents/types";
 
 export function confirmAction(
   app: App,
@@ -30,11 +38,326 @@ export function requestText(
   title: string,
   description: string,
   initialValue = "",
-  multiline = false
+  multiline = false,
+  inputLabel = "内容"
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
-    new TextRequestModal(app, title, description, initialValue, multiline, resolve).open();
+    new TextRequestModal(app, title, description, initialValue, multiline, inputLabel, resolve).open();
   });
+}
+
+export function chooseRevisionMode(app: App): Promise<EditableRevisionMode | undefined> {
+  return new Promise((resolve) => new RevisionModeModal(app, resolve).open());
+}
+
+class RevisionModeModal extends Modal {
+  private settled = false;
+
+  constructor(app: App, private readonly resolveChoice: (value?: EditableRevisionMode) => void) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.createEl("h2", { text: "选择 Raw 修订方式" });
+    this.contentEl.createEl("p", {
+      text: "修订不会覆盖原 Raw；该类型会作为来源关系交给 Ingest。",
+      cls: "llm-wiki-muted"
+    });
+    const options: Array<{ value: EditableRevisionMode; label: string; description: string }> = [
+      { value: "correction", label: "纠错", description: "修正原文中的错误、错字或错误数据。" },
+      { value: "supplement", label: "补充", description: "保留原意并增加解释、例子或新资料。" },
+      { value: "rewrite", label: "重写", description: "以原文为 Base 进行较大范围重组。" }
+    ];
+    for (const option of options) {
+      new Setting(this.contentEl)
+        .setName(option.label)
+        .setDesc(option.description)
+        .addButton((button) => button.setCta().setButtonText("选择").onClick(() => {
+          this.settled = true;
+          this.resolveChoice(option.value);
+          this.close();
+        }));
+    }
+  }
+
+  onClose(): void {
+    if (!this.settled) this.resolveChoice(undefined);
+    this.contentEl.empty();
+  }
+}
+
+export class EditableDiffModal extends Modal {
+  constructor(
+    app: App,
+    private readonly titleText: string,
+    private readonly diff: TextDiff,
+    private readonly onConfirm?: () => Promise<void> | void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.setTitle(this.titleText);
+    this.contentEl.createEl("p", {
+      text: `新增 ${this.diff.addedLines} 行，删除 ${this.diff.removedLines} 行，${this.diff.hunks.length} 个变更区段。`,
+      cls: "llm-wiki-muted"
+    });
+    if (this.diff.assetChanges) {
+      this.contentEl.createEl("p", {
+        text: `附件：新增 ${this.diff.assetChanges.added}，删除 ${this.diff.assetChanges.removed}，内容变化 ${this.diff.assetChanges.changed}。`,
+        cls: "llm-wiki-muted"
+      });
+    }
+    if (this.diff.truncated) {
+      this.contentEl.createEl("p", {
+        text: "文稿较大，Diff 已退化为有界比较；发布仍会校验完整内容 Hash。",
+        cls: "llm-wiki-warning"
+      });
+    }
+    this.contentEl.createEl("pre", {
+      text: renderUnifiedDiff(this.diff),
+      cls: "llm-wiki-diff llm-wiki-editable-diff"
+    });
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("关闭").onClick(() => this.close()))
+      .addButton((button) => {
+        if (!this.onConfirm) {
+          button.buttonEl.hidden = true;
+          return;
+        }
+        button.setCta().setButtonText("确认发布").onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await this.onConfirm?.();
+            this.close();
+          } catch (error) {
+            new Notice(error instanceof Error ? error.message : String(error));
+            button.setDisabled(false);
+          }
+        });
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+export class EditableHistoryModal extends Modal {
+  constructor(
+    private readonly plugin: LLMWikiPlugin,
+    private readonly document: EditableDocumentView
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.setTitle(`${this.document.title ?? this.document.record.title} · 发布历史`);
+    void this.renderHistory();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+
+  private async renderHistory(): Promise<void> {
+    this.contentEl.empty();
+    try {
+      const history = await this.plugin.wiki.getEditableDocumentHistory(this.document.record.documentId);
+      if (history.length === 0) {
+        this.contentEl.createEl("p", { text: "该文稿还没有发布过不可变快照。", cls: "llm-wiki-muted" });
+        return;
+      }
+      this.renderComparison(history);
+      const management = this.contentEl.createDiv({ cls: "llm-wiki-card" });
+      management.createEl("h3", { text: "历史管理" });
+      management.createEl("p", {
+        text: "单个快照和完整历史均先执行来源删除预检；存在共享批次、外部链接或回滚冲突时会被阻止。当前编辑稿不会随发布历史删除。",
+        cls: "llm-wiki-muted"
+      });
+      new Setting(management).addButton((button) => {
+        button.setButtonText("删除全部发布历史").buttonEl.addClass("mod-warning");
+        button.onClick(async () => {
+          button.setDisabled(true);
+          try {
+            const preview = await this.plugin.wiki.previewEditableHistoryDeletion(this.document.record.documentId);
+            if (preview.blockers.length > 0) {
+              new Notice(`当前不能安全删除：${preview.blockers.map((item) => item.reason).join("；")}`);
+              return;
+            }
+            const confirmed = await confirmAction(
+              this.app,
+              "删除全部发布历史",
+              `将永久删除 ${preview.sourceIds.length} 个不可变 Raw 快照，并按既有事务记录安全回退相关 Wiki。当前编辑稿会保留。`,
+              "删除全部快照",
+              true
+            );
+            if (!confirmed) return;
+            const count = await this.plugin.wiki.deleteEditableHistory(this.document.record.documentId);
+            new Notice(`已删除 ${count} 个发布快照，当前编辑稿保持不变`);
+            await this.renderHistory();
+            await this.plugin.refreshView();
+          } catch (error) {
+            new Notice(`删除历史失败：${error instanceof Error ? error.message : String(error)}`);
+          } finally {
+            button.setDisabled(false);
+          }
+        });
+      });
+      history.forEach((item, index) => this.renderHistoryItem(item, index + 1));
+    } catch (error) {
+      this.contentEl.createEl("p", {
+        text: `读取发布历史失败：${error instanceof Error ? error.message : String(error)}`,
+        cls: "llm-wiki-danger"
+      });
+    }
+  }
+
+  private renderComparison(history: EditablePublicationHistoryItem[]): void {
+    const card = this.contentEl.createDiv({ cls: "llm-wiki-card" });
+    card.createEl("h3", { text: "版本比较" });
+    let beforeSourceId = history[0]!.sourceId;
+    let afterSourceId = "current";
+    new Setting(card)
+      .setName("较早版本")
+      .addDropdown((dropdown) => {
+        history.forEach((item, index) => {
+          dropdown.addOption(item.sourceId, versionLabel(item, index + 1));
+        });
+        dropdown.setValue(beforeSourceId).onChange((value) => { beforeSourceId = value; });
+      });
+    new Setting(card)
+      .setName("较新版本")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("current", "当前编辑稿");
+        history.forEach((item, index) => {
+          dropdown.addOption(item.sourceId, versionLabel(item, index + 1));
+        });
+        dropdown.setValue(afterSourceId).onChange((value) => { afterSourceId = value; });
+      })
+      .addButton((button) => button.setCta().setButtonText("查看 Diff").onClick(async () => {
+        if (beforeSourceId === afterSourceId) {
+          new Notice("请选择两个不同版本");
+          return;
+        }
+        button.setDisabled(true);
+        try {
+          const diff = await this.plugin.wiki.diffEditablePublication(
+            this.document.record.documentId,
+            beforeSourceId,
+            afterSourceId === "current" ? undefined : afterSourceId
+          );
+          new EditableDiffModal(this.app, "历史版本差异", diff).open();
+        } catch (error) {
+          new Notice(`历史 Diff 失败：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          button.setDisabled(false);
+        }
+      }));
+  }
+
+  private renderHistoryItem(item: EditablePublicationHistoryItem, index: number): void {
+    const card = this.contentEl.createDiv({ cls: "llm-wiki-card" });
+    card.createEl("h3", { text: versionLabel(item, index) });
+    card.createEl("p", {
+      text: `${item.rawPath} · ${item.snapshotContentHash.slice(0, 12)} · ${item.assetCount} 个附件`,
+      cls: "llm-wiki-muted"
+    });
+    card.createEl("p", { text: `Ingest：${item.ingestStatus}${item.operationId ? ` · ${item.operationId}` : ""}`, cls: "llm-wiki-muted" });
+    new Setting(card)
+      .addButton((button) => button.setButtonText("打开 Raw").onClick(async () => {
+        try {
+          await this.plugin.openVaultPath(item.rawPath);
+        } catch (error) {
+          new Notice(error instanceof Error ? error.message : String(error));
+        }
+      }))
+      .addButton((button) => {
+        button.setButtonText("删除此快照").buttonEl.addClass("mod-warning");
+        button.onClick(async () => {
+          button.setDisabled(true);
+          try {
+            const preview = await this.plugin.workflows.previewSourceDeletion(item.sourceId);
+            new DeleteSourceModal(this.plugin, preview, () => { void this.renderHistory(); }).open();
+          } catch (error) {
+            new Notice(`删除预检失败：${error instanceof Error ? error.message : String(error)}`);
+          } finally {
+            button.setDisabled(false);
+          }
+        });
+      });
+  }
+}
+
+function versionLabel(item: EditablePublicationHistoryItem, index: number): string {
+  return `v${index} · ${new Date(item.publishedAt).toLocaleString()}`;
+}
+
+export class EditableRebaseModal extends Modal {
+  private readonly resolutions: Record<string, "user" | "upstream"> = {};
+
+  constructor(
+    private readonly plugin: LLMWikiPlugin,
+    private readonly preview: EditableRebasePreview
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.setTitle("将修订稿 Rebase 到最新 Raw");
+    this.contentEl.createEl("p", {
+      text: `Base r${this.preview.oldBase.parseRevision} → r${this.preview.newBase.parseRevision}。原修订稿不会被覆盖，将生成一份新的修订稿。`,
+      cls: "llm-wiki-muted"
+    });
+    if (this.preview.conflicts.length === 0) {
+      this.contentEl.createEl("p", { text: "没有检测到重叠修改，可以自动合并。" });
+    } else {
+      this.contentEl.createEl("p", {
+        text: `检测到 ${this.preview.conflicts.length} 个重叠修改，请逐项选择。`,
+        cls: "llm-wiki-warning"
+      });
+      for (const conflict of this.preview.conflicts) {
+        const card = this.contentEl.createDiv({ cls: "llm-wiki-card" });
+        card.createEl("h3", { text: `${conflict.conflictId} · Base 行 ${conflict.startLine}-${conflict.endLine}` });
+        card.createEl("p", { text: "我的修订", cls: "llm-wiki-muted" });
+        card.createEl("pre", { text: conflict.user, cls: "llm-wiki-diff" });
+        card.createEl("p", { text: "最新 Raw", cls: "llm-wiki-muted" });
+        card.createEl("pre", { text: conflict.upstream, cls: "llm-wiki-diff" });
+        new Setting(card).setName("采用内容").addDropdown((dropdown) => dropdown
+          .addOption("", "请选择")
+          .addOption("user", "保留我的修订")
+          .addOption("upstream", "采用最新 Raw")
+          .onChange((value) => {
+            if (value === "user" || value === "upstream") this.resolutions[conflict.conflictId] = value;
+            else delete this.resolutions[conflict.conflictId];
+          }));
+      }
+    }
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("取消").onClick(() => this.close()))
+      .addButton((button) => button.setCta().setButtonText("生成新修订稿").onClick(async () => {
+        if (this.preview.conflicts.some((conflict) => !this.resolutions[conflict.conflictId])) {
+          new Notice("请先处理全部 Rebase 冲突");
+          return;
+        }
+        button.setDisabled(true);
+        try {
+          const view = await this.plugin.wiki.applyEditableRebase(this.preview, this.resolutions);
+          await this.plugin.openVaultPath(view.record.path);
+          await this.plugin.refreshView();
+          this.close();
+          new Notice("已生成基于最新 Raw 的修订稿；原修订稿保持不变");
+        } catch (error) {
+          new Notice(`Rebase 失败：${error instanceof Error ? error.message : String(error)}`);
+          button.setDisabled(false);
+        }
+      }));
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 class ConfirmationModal extends Modal {
@@ -86,6 +409,7 @@ class TextRequestModal extends Modal {
     private readonly description: string,
     initialValue: string,
     private readonly multiline: boolean,
+    private readonly inputLabel: string,
     private readonly resolve: (value: string | undefined) => void
   ) {
     super(app);
@@ -95,7 +419,7 @@ class TextRequestModal extends Modal {
   onOpen(): void {
     this.setTitle(this.titleText);
     if (this.description) this.contentEl.createEl("p", { text: this.description });
-    const setting = new Setting(this.contentEl).setName("内容");
+    const setting = new Setting(this.contentEl).setName(this.inputLabel);
     if (this.multiline) {
       setting.addTextArea((input) => input
         .setValue(this.value)
@@ -585,7 +909,8 @@ export class ReviewModal extends Modal {
       }
       row.createEl("h3", { text: `${operation.action === "create" ? "新增" : "修改"} · ${operation.path}` });
       card.createEl("p", { text: operation.reason || "未提供原因", cls: "llm-wiki-muted" });
-      card.createEl("pre", { text: operation.content, cls: "llm-wiki-diff" });
+      const diffEl = card.createEl("pre", { text: "正在生成 Diff…", cls: "llm-wiki-diff" });
+      void this.renderOperationDiff(operation.path, operation.content, diffEl);
     }
     if (this.readOnly) {
       new Setting(contentEl).setDesc("Dry run：该计划不会进入待审阅状态，也不能 Apply。")
@@ -615,6 +940,24 @@ export class ReviewModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+  }
+
+  private async renderOperationDiff(
+    path: string,
+    proposedContent: string,
+    target: HTMLPreElement
+  ): Promise<void> {
+    try {
+      const existing = this.plugin.app.vault.getAbstractFileByPath(path);
+      const before = existing instanceof TFile
+        ? await this.plugin.app.vault.cachedRead(existing)
+        : "";
+      const diff = computeTextDiff(before, proposedContent);
+      target.setText(renderUnifiedDiff(diff) || "（内容未变化）");
+      if (diff.truncated) target.dataset.diffMode = "bounded";
+    } catch (error) {
+      target.setText(`Diff 生成失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
@@ -784,6 +1127,14 @@ function renderKnowledgeDecision(container: HTMLElement, decision: KnowledgeDeci
   const card = container.createDiv({ cls: "llm-wiki-card" });
   card.createEl("strong", { text: `${decisionLabel(decision.decision)} · ${decision.title}` });
   if (decision.targetPath) card.createDiv({ text: decision.targetPath, cls: "llm-wiki-muted" });
+  if (decision.revisionContext) {
+    const label = decision.revisionContext.mode === "supplement" ? "用户补充"
+      : decision.revisionContext.mode === "correction" ? "用户纠错" : "用户重写";
+    card.createDiv({
+      text: `${label}${decision.revisionContext.baseSourceId ? ` · Base ${shortId(decision.revisionContext.baseSourceId)}` : ""}`,
+      cls: "llm-wiki-muted"
+    });
+  }
   card.createEl("p", { text: decision.reason });
   card.createDiv({
     text: `Evidence: ${decision.evidence.map(formatCoverageEvidence).join(", ")}`,

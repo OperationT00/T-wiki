@@ -73,6 +73,76 @@ test("IngestCoordinator uses Flash then Pro, rejects guessed sections, and build
   assert.equal(sourcePage.frontmatter.url, "https://example.com/article?token=%5BREDACTED%5D&view=full");
 });
 
+test("IngestCoordinator uses host-computed incremental sections without an LLM navigation request", async () => {
+  const input = ingestInput();
+  input.lineage = {
+    type: "user-revision",
+    documentId: "revision-document",
+    mode: "correction",
+    baseSourceId: "source-previous"
+  };
+  input.incremental = {
+    previousSourceId: "source-previous",
+    previousContentHash: "d".repeat(64),
+    changedSectionIds: ["s0001"],
+    contextSectionIds: [],
+    unchangedSectionCount: 3,
+    removedHeadings: []
+  };
+  const runtime = new CoordinatorRuntime(input);
+  const coordinator = new IngestCoordinator(coordinatorHost(input, []) as any, factory(runtime), settings);
+  const result = await coordinator.run({
+    attempts: [{ sourceId: input.sourceId, attemptId: "attempt", input }],
+    budget: DEFAULT_AGENT_BUDGETS.ingest,
+    sink: () => undefined,
+    signal: new AbortController().signal
+  });
+
+  assert.equal(runtime.tools.includes("select_raw_sections"), false);
+  assert.deepEqual(result.plan.ingestCoverage?.sources[0]?.reviewedSectionIds, ["s0001"]);
+  assert.deepEqual(result.plan.ingestCoverage?.decisions[0]?.revisionContext, {
+    mode: "correction",
+    baseSourceId: "source-previous",
+    handling: "corrected",
+    provenance: "user-revision"
+  });
+});
+
+test("editable snapshots reuse one Source page by document identity across publications", async () => {
+  const input = ingestInput();
+  input.lineage = {
+    type: "user-note",
+    documentId: "editable-document-0001",
+    snapshotContentHash: "e".repeat(64)
+  };
+  input.rawPath = "raw/articles/new-note-snapshot.md";
+  input.sourceHash = "f".repeat(64);
+  const existingContent = makePageTemplate(
+    "source",
+    "旧笔记快照",
+    "旧摘要",
+    "# 旧笔记快照\n\n旧内容。"
+  ).replace("related: []", "related: []\neditable_document_id: editable-document-0001")
+    .replace('raw_path: ""', "raw_path: raw/articles/old-note-snapshot.md")
+    .replace('raw_hash: ""', `raw_hash: ${"a".repeat(64)}`);
+  const existing = wikiPage("wiki/sources/stable-editable-note.md", existingContent);
+  const runtime = new CoordinatorRuntime(input);
+  const coordinator = new IngestCoordinator(coordinatorHost(input, [existing]) as any, factory(runtime), settings);
+
+  const result = await coordinator.run({
+    attempts: [{ sourceId: input.sourceId, attemptId: "attempt", input }],
+    budget: DEFAULT_AGENT_BUDGETS.ingest,
+    sink: () => undefined,
+    signal: new AbortController().signal
+  });
+  const sourceOperation = result.plan.operations.find((operation) => operation.path === existing.path);
+  assert.equal(sourceOperation?.action, "update");
+  const sourcePage = parseMarkdown(existing.path, sourceOperation!.content)!;
+  assert.equal(sourcePage.frontmatter.editable_document_id, "editable-document-0001");
+  assert.equal(sourcePage.frontmatter.raw_path, input.rawPath);
+  assert.equal(sourcePage.frontmatter.raw_hash, input.sourceHash);
+});
+
 test("IngestCoordinator registers one Wiki evidence for repeated search matches and emits already-covered coverage", async () => {
   const input = ingestInput();
   const existingContent = makePageTemplate("concept", "TCP 粘包", "已有完整内容", "# TCP 粘包\n\n已有完整内容。");

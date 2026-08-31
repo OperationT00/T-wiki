@@ -486,6 +486,7 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
   const sourceKind = kindForExtension(extension);
   const source = (input.source ?? {}) as Record<string, unknown>;
   const capture = normalizeCaptureMetadata(source.capture);
+  const lineage = normalizeSourceLineage(source.lineage);
   const metadata = normalizeSourceMetadata(source.metadata);
   return {
     ...input,
@@ -501,7 +502,8 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
           : {}),
       acquiredBy: typeof source.acquiredBy === "string" ? source.acquiredBy : "legacy-v2",
       ...(metadata ? { metadata } : {}),
-      ...(capture ? { capture } : {})
+      ...(capture ? { capture } : {}),
+      ...(lineage ? { lineage } : {})
     },
     parse: {
       ...input.parse,
@@ -526,6 +528,32 @@ export function normalizeManifest(value: unknown, path = "manifest"): SourceMani
       }))
     }
   } as SourceManifest;
+}
+
+function normalizeSourceLineage(value: unknown): SourceManifest["source"]["lineage"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  if ((input.type !== "user-note" && input.type !== "user-revision")
+    || typeof input.documentId !== "string"
+    || !/^[a-zA-Z0-9-]{8,80}$/.test(input.documentId)) return undefined;
+  const mode = input.mode === "supplement" || input.mode === "correction" || input.mode === "rewrite"
+    ? input.mode
+    : undefined;
+  return {
+    type: input.type,
+    documentId: input.documentId,
+    ...(typeof input.snapshotContentHash === "string" && /^[a-f0-9]{64}$/.test(input.snapshotContentHash)
+      ? { snapshotContentHash: input.snapshotContentHash }
+      : {}),
+    ...(mode ? { mode } : {}),
+    ...(typeof input.baseSourceId === "string" ? { baseSourceId: input.baseSourceId } : {}),
+    ...(typeof input.baseParseRevision === "number" && Number.isInteger(input.baseParseRevision)
+      ? { baseParseRevision: input.baseParseRevision }
+      : {}),
+    ...(typeof input.baseContentHash === "string" && /^[a-f0-9]{64}$/.test(input.baseContentHash)
+      ? { baseContentHash: input.baseContentHash }
+      : {})
+  };
 }
 
 function normalizeCaptureMetadata(value: unknown): SourceManifest["source"]["capture"] | undefined {

@@ -5,7 +5,7 @@ import { DEFAULT_AGENT_BUDGETS } from "../src/agent/agent-settings";
 import { enrichWikiContent } from "../src/agent/wiki-link-graph";
 import type { AgentRuntimeFactory } from "../src/agent/runtime-factory";
 import { makePageTemplate, parseMarkdown, sanitizePlanDanglingLinks, sha256, validateChangePlan } from "../src/core/wiki-core";
-import { validateSourceDeletionChain } from "../src/services/source-deletion";
+import { validateReceiptSourceScope, validateSourceDeletionChain } from "../src/services/source-deletion";
 import { WorkflowService } from "../src/services/workflow-service";
 import type {
   AgentConfig,
@@ -273,6 +273,26 @@ test("source deletion validates multiple Ingest receipts as one reverse hash cha
   assert.match(
     validateSourceDeletionChain(receipts, new Map([[path, "later manual edit"]]))[0]?.reason ?? "",
     /后续操作修改/
+  );
+});
+
+test("editable history accepts a cross-snapshot receipt but blocks sources outside the document chain", () => {
+  const receipt: RollbackReceipt = {
+    version: 1,
+    operationId: "operation-shared-history",
+    status: "applied",
+    summary: "two snapshots",
+    appliedAt: "2026-01-02T00:00:00.000Z",
+    sourceIds: ["snapshot-1", "snapshot-2"],
+    changes: []
+  };
+  assert.deepEqual(
+    validateReceiptSourceScope(receipt, new Set(["snapshot-1", "snapshot-2"])),
+    []
+  );
+  assert.match(
+    validateReceiptSourceScope(receipt, new Set(["snapshot-1"]))[0]?.reason ?? "",
+    /snapshot-2/
   );
 });
 

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { markdownSections, type MarkdownSection } from "../core/markdown-sections";
+import { sha256 } from "../core/wiki-core";
 import { KeyedLock } from "../parsing/keyed-lock";
 import { interruptedError, toPipelineError } from "../parsing/pipeline-errors";
 import type { ManifestRepositoryPort, RawVerifierPort } from "../parsing/ports";
@@ -72,10 +74,42 @@ export class IngestPreparationService {
           parserId: revision.parserId,
           parserVersion: revision.parserVersion,
           parseWarnings: revision.warnings,
-          metadata: revision.metadata
+          metadata: revision.metadata,
+          lineage: manifest.source.lineage ? structuredClone(manifest.source.lineage) : undefined,
+          incremental: await this.incrementalScope(manifest, verified.body)
         }
       };
     });
+  }
+
+  private async incrementalScope(
+    manifest: SourceManifest,
+    currentContent: string
+  ): Promise<IngestInput["incremental"]> {
+    const lineage = manifest.source.lineage;
+    if (!lineage) return undefined;
+    const all = await this.manifests.list();
+    const explicitBase = lineage.baseSourceId
+      ? all.find((item) => item.sourceId === lineage.baseSourceId && item.ingest.status === "ingested")
+      : undefined;
+    const previous = explicitBase ?? all
+      .filter((item) => item.sourceId !== manifest.sourceId
+        && item.source.lineage?.documentId === lineage.documentId
+        && item.ingest.status === "ingested"
+        && item.parse.status === "parsed"
+        && item.original.importedAt <= manifest.original.importedAt)
+      .sort((left, right) => latestIngestTime(right).localeCompare(latestIngestTime(left)))[0];
+    if (!previous) return undefined;
+    const revision = currentRevision(previous);
+    if (!revision) return undefined;
+    try {
+      const prior = await this.verifier.readAndVerifyRevision(previous, revision.revision);
+      return compareSections(previous.sourceId, revision.contentHash, prior.body, currentContent);
+    } catch {
+      // Incremental scope is an optimization. Verification failure falls back to
+      // the existing full-source path instead of weakening Ingest correctness.
+      return undefined;
+    }
   }
 
   async update(
@@ -119,4 +153,57 @@ export class IngestPreparationService {
   pipelineError(error: unknown, stage: PipelineError["stage"]): PipelineError {
     return toPipelineError(error, stage);
   }
+}
+
+function compareSections(
+  previousSourceId: string,
+  previousContentHash: string,
+  previousContent: string,
+  currentContent: string
+): NonNullable<IngestInput["incremental"]> | undefined {
+  const previous = keyedSections(markdownSections(previousContent));
+  const current = keyedSections(markdownSections(currentContent));
+  const changedIndexes: number[] = [];
+  for (let index = 0; index < current.length; index += 1) {
+    const section = current[index]!;
+    const old = previous.find((item) => item.key === section.key);
+    if (!old || sha256(old.section.content) !== sha256(section.section.content)) changedIndexes.push(index);
+  }
+  const currentKeys = new Set(current.map((item) => item.key));
+  const removedHeadings = previous
+    .filter((item) => !currentKeys.has(item.key))
+    .map((item) => item.section.heading);
+  if (changedIndexes.length === 0 && removedHeadings.length === 0) return undefined;
+  // The Coordinator's evidence ceiling is 24 sections. A larger delta is no
+  // longer meaningfully incremental, so preserve the established full review.
+  if (changedIndexes.length > 24) return undefined;
+  const contextIndexes = new Set<number>();
+  for (const index of changedIndexes) {
+    if (index > 0) contextIndexes.add(index - 1);
+    if (index + 1 < current.length) contextIndexes.add(index + 1);
+  }
+  for (const index of changedIndexes) contextIndexes.delete(index);
+  return {
+    previousSourceId,
+    previousContentHash,
+    changedSectionIds: changedIndexes.map((index) => current[index]!.section.sectionId),
+    contextSectionIds: [...contextIndexes].sort((a, b) => a - b).map((index) => current[index]!.section.sectionId),
+    unchangedSectionCount: Math.max(0, current.length - changedIndexes.length),
+    removedHeadings: [...new Set(removedHeadings)]
+  };
+}
+
+function keyedSections(sections: MarkdownSection[]): Array<{ key: string; section: MarkdownSection }> {
+  const occurrences = new Map<string, number>();
+  return sections.map((section) => {
+    const identity = `${section.level}\u0000${section.heading.trim().toLocaleLowerCase()}`;
+    const occurrence = (occurrences.get(identity) ?? 0) + 1;
+    occurrences.set(identity, occurrence);
+    return { key: `${identity}\u0000${occurrence}`, section };
+  });
+}
+
+function latestIngestTime(manifest: SourceManifest): string {
+  return [...manifest.ingest.attempts].reverse().find((attempt) => attempt.status === "ingested")?.completedAt
+    ?? manifest.original.importedAt;
 }
