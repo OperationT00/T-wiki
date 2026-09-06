@@ -162,6 +162,11 @@ export class ParsingFacade {
     return this.orchestrator.parseSource(sourceId, { resume: true, parserId });
   }
 
+  async recoverPendingPublication(sourceId: string): Promise<SourceManifest> {
+    await this.initialize();
+    return this.orchestrator.recoverPendingPublication(sourceId);
+  }
+
   async discardMediaResume(sourceId: string): Promise<SourceManifest> {
     await this.initialize();
     await this.cleanupSourceArtifacts(sourceId);

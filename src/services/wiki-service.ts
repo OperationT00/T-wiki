@@ -35,6 +35,7 @@ import type {
   LintReport,
   RawRecord,
   RawVerification,
+  RecoveryOverview,
   RollbackPreview,
   RollbackReceipt,
   RollbackResult,
@@ -65,6 +66,7 @@ import { computeTextDiff } from "../editable-documents/text-diff";
 import { validateReceiptSourceScope, validateSourceDeletionChain } from "./source-deletion";
 import { ContentSnapshotStore } from "./content-snapshot-store";
 import { PendingPlanStore } from "./pending-plan-store";
+import { RecoveryCenterService } from "./recovery-center";
 import { classifyTransactionFile } from "./transaction-recovery";
 import {
   atomicReplaceText,
@@ -142,6 +144,27 @@ export class WikiService {
   async pendingPlanStore(): Promise<PendingPlanStore> {
     const config = await this.loadConfig();
     return new PendingPlanStore(this.adapter, `${config.paths.internal}/pending-plan.json`);
+  }
+
+  async inspectRecovery(): Promise<RecoveryOverview> {
+    const config = await this.loadConfig();
+    const sources = new SourceStore(this.adapter, config.paths.internal);
+    return new RecoveryCenterService(
+      this.adapter,
+      config.paths.internal,
+      () => sources.manifests.inspect()
+    ).inspect();
+  }
+
+  async writeRecoveryDiagnostic(overview?: RecoveryOverview): Promise<string> {
+    const config = await this.loadConfig();
+    const sources = new SourceStore(this.adapter, config.paths.internal);
+    const service = new RecoveryCenterService(
+      this.adapter,
+      config.paths.internal,
+      () => sources.manifests.inspect()
+    );
+    return service.writeDiagnostic(overview ?? await service.inspect());
   }
 
   async isInitialized(): Promise<boolean> {
@@ -837,6 +860,11 @@ export class WikiService {
   async resumeSourceWith(sourceId: string, parserId: string): Promise<SourceManifest> {
     await this.ensureParsingFrameworkCurrent();
     return (await this.parsingService()).resumeSourceWith(sourceId, parserId);
+  }
+
+  async recoverPendingRawPublication(sourceId: string): Promise<SourceManifest> {
+    await this.ensureParsingFrameworkCurrent();
+    return (await this.parsingService()).recoverPendingPublication(sourceId);
   }
 
   async discardMediaResume(sourceId: string): Promise<SourceManifest> {

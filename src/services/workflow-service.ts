@@ -343,6 +343,25 @@ export class WorkflowService {
     await this.clearPending();
   }
 
+  /** Explicit user action for a missing/corrupt Pending Plan; no Wiki content is changed. */
+  async discardUnrestorablePending(): Promise<number> {
+    if (this.pendingPlan) {
+      const count = this.pendingAgentPlan?.attempts.length ?? 0;
+      await this.rejectPending();
+      return count;
+    }
+    let reset = 0;
+    for (const source of await this.wiki.listSources()) {
+      const attempt = [...source.ingest.attempts].reverse().find((candidate) => candidate.status === "awaiting_review");
+      if (!attempt) continue;
+      await this.wiki.updateIngestAttempt(source.sourceId, attempt.attemptId, "not_started");
+      reset += 1;
+    }
+    await (await this.wiki.pendingPlanStore()).clear();
+    this.ingestProgress.clear((await this.wiki.listSources()).map((source) => source.sourceId));
+    return reset;
+  }
+
   async previewIngestRollback(target?: string): Promise<RollbackPreview> {
     const sources = await this.wiki.listSources();
     const candidates = sources.flatMap((source) => source.ingest.attempts

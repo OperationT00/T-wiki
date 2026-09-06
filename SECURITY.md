@@ -26,6 +26,17 @@ and initiated by the user. Remote ASR, vision, MinerU, and LLM requests show or
 document their destination and require configured credentials. Tokens are kept
 in Obsidian Secret Storage and are redacted from diagnostics.
 
+Recovery diagnostics are generated only after an explicit user action. They
+contain recovery kinds, IDs, timestamps, counts and sanitized error summaries;
+they do not contain Raw/Wiki content, prompts, media chunks, access tokens, URL
+query parameters, or local absolute paths.
+
+Quality-acceptance observations and reports are local developer artifacts.
+Their schema accepts only scenario/run identifiers, timestamps, origins, and
+numeric metrics; `.llm-wiki-acceptance/` is ignored by Git. Prompts, answers,
+source text, media, local paths, service URLs, and credentials must not be added
+to acceptance files.
+
 ## Vault access boundaries
 
 - Clipper scanning is restricted to the configured Inbox folder.

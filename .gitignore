@@ -4,6 +4,8 @@ main.js
 *.map
 *.log
 coverage/
+.llm-wiki-acceptance/
+acceptance-report.json
 .env
 .env.*
 .DS_Store

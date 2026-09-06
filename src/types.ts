@@ -408,6 +408,49 @@ export interface RawVerification {
   issues: ParseIssue[];
 }
 
+export type RecoveryItemKind =
+  | "transaction"
+  | "pending-plan"
+  | "raw-publication"
+  | "media-resume"
+  | "parse-retry"
+  | "manifest";
+
+export type RecoveryAction =
+  | "recover-transactions"
+  | "restore-pending-plan"
+  | "recover-raw-publication"
+  | "resume-media"
+  | "retry-parse"
+  | "none";
+
+/** Metadata-only recovery state. It must never contain Raw, Wiki or model content. */
+export interface RecoveryItem {
+  id: string;
+  kind: RecoveryItemKind;
+  severity: "info" | "warning" | "error";
+  title: string;
+  detail: string;
+  action: RecoveryAction;
+  sourceId?: string;
+  operationId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  progress?: { completed: number; total: number };
+}
+
+export interface RecoveryOverview {
+  version: 1;
+  generatedAt: string;
+  healthy: boolean;
+  counts: {
+    total: number;
+    recoverable: number;
+    blocked: number;
+  };
+  items: RecoveryItem[];
+}
+
 export interface WikiPage {
   path: string;
   basename: string;
@@ -778,7 +821,7 @@ export interface PluginSettings {
     budgets: Record<AgentBudgetName, AgentBudget>;
     models: ModelProfile[];
   };
-  activeTab: "home" | "materials" | "notes" | "agent" | "review" | "query";
+  activeTab: "home" | "materials" | "notes" | "agent" | "review" | "query" | "recovery";
   sessions: ChatSession[];
   activeSessionId: string;
   webClipper: {

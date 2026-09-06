@@ -88,6 +88,38 @@
   background: var(--background-modifier-hover);
 }
 
+.llm-wiki-recovery-header {
+  display: grid;
+  gap: 10px;
+}
+
+.llm-wiki-recovery-header h3,
+.llm-wiki-recovery-header p,
+.llm-wiki-recovery-item h3,
+.llm-wiki-recovery-item p,
+.llm-wiki-recovery-empty h3,
+.llm-wiki-recovery-empty p {
+  margin-top: 0;
+  margin-bottom: 6px;
+}
+
+.llm-wiki-recovery-item {
+  border-left: 3px solid var(--background-modifier-border);
+}
+
+.llm-wiki-recovery-item.is-error {
+  border-left-color: var(--color-red);
+}
+
+.llm-wiki-recovery-item.is-warning {
+  border-left-color: var(--color-orange);
+}
+
+.llm-wiki-recovery-item.is-info,
+.llm-wiki-recovery-empty {
+  border-left-color: var(--color-green);
+}
+
 .llm-wiki-smart-workspace {
   display: flex;
   flex-direction: column;

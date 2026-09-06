@@ -315,6 +315,33 @@ test("cancelling Ingest aborts the Agent and leaves a retryable progress state",
   assert.equal(manifest.parse.status, "parsed");
 });
 
+test("explicit recovery cleanup discards an unrestorable Pending Plan and resets awaiting sources", async () => {
+  const manifest = sourceManifest();
+  manifest.ingest.status = "awaiting_review";
+  manifest.ingest.attempts.push({
+    attemptId: "orphan-attempt",
+    revision: 1,
+    status: "awaiting_review",
+    startedAt: "2026-09-06T00:00:00.000Z",
+    operationId: "orphan-operation",
+    acceptedPaths: []
+  });
+  const updates: string[] = [];
+  let cleared = 0;
+  const wiki = makeWikiHost({
+    listSources: async () => [manifest],
+    updateIngestAttempt: async (_sourceId: string, _attemptId: string, status: string) => { updates.push(status); },
+    pendingPlanStore: async () => ({ clear: async () => { cleared += 1; } })
+  });
+  const service = new WorkflowService(wiki as any, new ErrorFactory(), settings);
+
+  const reset = await service.discardUnrestorablePending();
+
+  assert.equal(reset, 1);
+  assert.deepEqual(updates, ["not_started"]);
+  assert.equal(cleared, 1);
+});
+
 class ScriptedFactory implements AgentRuntimeFactory {
   constructor(private readonly input: IngestInput) {}
   async create(): Promise<AgentRuntime> { return new ScriptedRuntime(this.input); }

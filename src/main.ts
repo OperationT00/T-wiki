@@ -138,6 +138,10 @@ export default class LLMWikiPlugin extends Plugin {
         } catch (error) {
           new Notice(`待审核计划无法安全恢复：${error instanceof Error ? error.message : String(error)}`);
         }
+        const recovery = await this.wiki.inspectRecovery().catch(() => null);
+        if (recovery?.counts.blocked) {
+          new Notice(`T-Wiki 恢复中心有 ${recovery.counts.blocked} 个项目需要处理`);
+        }
         await this.restartWebClipperConnector();
       }
     });
@@ -605,6 +609,20 @@ export default class LLMWikiPlugin extends Plugin {
       name: "打开智能工作区（知识查询）",
       callback: async () => {
         this.settings.activeTab = "query";
+        await this.saveSettings();
+        await this.openWorkbench();
+        await this.refreshView();
+      }
+    });
+    this.addCommand({
+      id: "open-recovery-center",
+      name: "打开恢复中心",
+      callback: async () => {
+        if (!(await this.wiki.isInitialized())) {
+          new Notice("请先初始化 T-Wiki");
+          return;
+        }
+        this.settings.activeTab = "recovery";
         await this.saveSettings();
         await this.openWorkbench();
         await this.refreshView();

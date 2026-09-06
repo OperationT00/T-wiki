@@ -4,6 +4,24 @@ All notable changes to T-Wiki are documented in this file.
 
 ## Unreleased
 
+## 0.1.7
+
+- Add a versioned acceptance suite for standard and incremental Ingest, direct and two-hop Query, mixed Parse workloads, crash recovery and media transcript quality.
+- Evaluate P50/P95, mean, minimum and maximum metrics against explicit fail-closed thresholds.
+- Require at least five samples per scenario and reject missing, duplicate, non-finite or impossible ratio observations.
+- Derive latency, Provider requests, Token usage, duplicate reads, Evidence completion, Wiki reads and graph hops from existing Agent run traces.
+- Keep semantic relevance, unsupported claims and transcript readability as explicit fixed-answer or manual assessments instead of inferring quality from workflow success.
+- Add a metadata-only acceptance CLI and exclude local observations and reports from Git.
+
+## 0.1.6
+
+- Add a Recovery Center backed directly by Transaction Journal, Pending Plan, ParseAttempt and media checkpoint records.
+- Surface unfinished Wiki transactions, corrupt recovery records, pending reviews, Raw publication commits, resumable media jobs and retryable parses.
+- Allow safe retries for transaction recovery, Pending Plan restoration, Raw publication verification, media continuation and source parsing.
+- Require explicit confirmation before discarding a corrupt Pending Plan or media checkpoint; immutable media objects and applied Wiki content remain untouched.
+- Export metadata-only recovery diagnostics with Token, URL query and local-path redaction.
+- Notify users at startup when automatic recovery leaves blocked items requiring attention.
+
 ## 0.1.5
 
 - Add a user-owned `notes/t-wiki/` workspace for blank notes and hash-bound Raw revision drafts.

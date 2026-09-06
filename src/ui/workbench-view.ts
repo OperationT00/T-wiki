@@ -16,6 +16,8 @@ import type {
   ParseProgress,
   ParseProgressEvent,
   PluginSettings,
+  RecoveryItem,
+  RecoveryOverview,
   SourceManifest
 } from "../types";
 import {
@@ -132,12 +134,13 @@ export class WorkbenchView extends ItemView {
     await this.ensureProgressSubscription();
 
     const tabs = root.createDiv({ cls: "llm-wiki-tabs" });
-    const definitions: Array<{ id: "home" | "materials" | "notes" | "smart" | "review"; label: string }> = [
+    const definitions: Array<{ id: "home" | "materials" | "notes" | "smart" | "review" | "recovery"; label: string }> = [
       { id: "home", label: "首页" },
       { id: "materials", label: "素材" },
       { id: "notes", label: "笔记" },
       { id: "smart", label: "智能" },
-      { id: "review", label: "审阅" }
+      { id: "review", label: "审阅" },
+      { id: "recovery", label: "恢复" }
     ];
     for (const { id, label } of definitions) {
       const button = tabs.createEl("button", { text: label, cls: "llm-wiki-tab" });
@@ -161,6 +164,7 @@ export class WorkbenchView extends ItemView {
       await this.renderSmart(panel);
     }
     if (this.plugin.settings.activeTab === "review") this.renderReview(panel);
+    if (this.plugin.settings.activeTab === "recovery") await this.renderRecovery(panel);
     if (previousScrollTop > 0) {
       panel.scrollTop = previousScrollTop;
       window.requestAnimationFrame(() => { panel.scrollTop = previousScrollTop; });
@@ -693,75 +697,7 @@ export class WorkbenchView extends ItemView {
           : source.parse.status === "parsed" ? "重新生成文字稿" : "开始远程转写",
         cls: "mod-cta"
       });
-      transcribe.onclick = async () => {
-        const options = mediaProvider.options;
-        const preprocessing = options.preprocessing && typeof options.preprocessing === "object"
-          ? options.preprocessing as Record<string, unknown>
-          : {};
-        const visual = options.visual && typeof options.visual === "object"
-          ? options.visual as Record<string, unknown>
-          : {};
-        const vision = visual.vision && typeof visual.vision === "object"
-          ? visual.vision as Record<string, unknown>
-          : {};
-        const formatting = options.formatting && typeof options.formatting === "object"
-          ? options.formatting as Record<string, unknown>
-          : {};
-        const visualLines = source.source.kind === "video" && visual.enabled === true
-          ? [
-            "",
-            "关键画面已启用：",
-            `本地 FFmpeg：${String(preprocessing.ffmpegPath || visual.ffmpegPath || "PATH 自动查找")}`,
-            `视觉服务：${String(vision.baseUrl ?? "")}`,
-            `视觉模型：${String(vision.model ?? "")}`,
-            "将上传候选帧的 512px 缩略图与前后 30 秒文字，不上传完整视频。"
-          ]
-          : [];
-        const titleModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
-          ?? this.plugin.settings.agent.models[0];
-        const formattingLines = formatting.mode === "constrained-llm"
-          ? [
-            `文字稿整理：约束式 Fast 模型（${titleModel?.id ?? "未配置 fast 模型"}）`,
-            `Agent 服务：${this.plugin.settings.agent.baseUrl}`,
-            "完整文字稿会分批发送给 Agent API；宿主会校验 Segment 顺序、数字、英文术语和字符守恒，校验失败自动回退本地分段。"
-          ]
-          : ["文字稿整理：纯本地规则，不会为分句分段额外发送完整文字稿。"];
-        const summary = [
-          `来源：${source.original.name}`,
-          `大小：${formatBytes(source.original.size)}`,
-          `协议：${String(options.protocol ?? "openai-transcriptions")}`,
-          `服务：${String(options.baseUrl ?? "")}`,
-          `模型：${String(options.model ?? "")}`,
-          `媒体预处理：${preprocessing.enabled === false ? "关闭，可能上传完整原件" : "开启，上传 16 kHz 单声道音频分片"}`,
-          ...(preprocessing.enabled === false ? [] : [
-            `分片：${Math.round(Number(preprocessing.chunkDurationSeconds ?? 900) / 60)} 分钟，重叠 ${Number(preprocessing.overlapSeconds ?? 2)} 秒`,
-            "中断后会保留已完成分片；继续前仍需再次确认远程上传。"
-          ]),
-          `标题生成：${titleModel?.id ?? "未配置 fast 模型"}`,
-          "标题生成会把最多约 8,000 字的代表性文字稿发送给 Agent API。",
-          ...formattingLines,
-          ...visualLines,
-          "",
-          ...(source.parse.status === "parsed"
-            ? ["这会创建新的 Parse Revision，旧 revision 仍保留在 Manifest 历史中。", ""]
-            : []),
-          "是否仅授权本次 ASR 转写、文字稿整理及上方列出的视觉分析？"
-        ].join("\n");
-        if (!await confirmAction(this.app, "确认远程解析", summary, "确认并解析", true)) return;
-        transcribe.disabled = true;
-        try {
-          this.plugin.mediaUploadConsent.approve(source.sourceId);
-          if (resumableMediaAttempt) {
-            await this.plugin.wiki.resumeSourceWith(source.sourceId, "media-transcription");
-          } else {
-            await this.plugin.wiki.reparseSourceWith(source.sourceId, "media-transcription");
-          }
-        } catch (error) {
-          new Notice(error instanceof Error ? error.message : String(error));
-        } finally {
-          await this.render();
-        }
-      };
+      transcribe.onclick = () => void this.runMediaTranscription(source, Boolean(resumableMediaAttempt), transcribe);
       if (resumableMediaAttempt) {
         const discard = card.createEl("button", { text: "放弃并清理断点" });
         discard.onclick = async () => {
@@ -856,6 +792,83 @@ export class WorkbenchView extends ItemView {
           ingest.disabled = false;
         }
       };
+    }
+  }
+
+  private async runMediaTranscription(
+    source: SourceManifest,
+    resume: boolean,
+    button?: HTMLButtonElement
+  ): Promise<void> {
+    const mediaProvider = (await this.plugin.wiki.loadConfig()).parsing.providers["media-transcription"];
+    if (mediaProvider?.enabled !== true) {
+      new Notice("请先在 T-Wiki 设置的“音视频解析”中启用远程转写");
+      return;
+    }
+    const options = mediaProvider.options;
+    const preprocessing = options.preprocessing && typeof options.preprocessing === "object"
+      ? options.preprocessing as Record<string, unknown>
+      : {};
+    const visual = options.visual && typeof options.visual === "object"
+      ? options.visual as Record<string, unknown>
+      : {};
+    const vision = visual.vision && typeof visual.vision === "object"
+      ? visual.vision as Record<string, unknown>
+      : {};
+    const formatting = options.formatting && typeof options.formatting === "object"
+      ? options.formatting as Record<string, unknown>
+      : {};
+    const visualLines = source.source.kind === "video" && visual.enabled === true
+      ? [
+        "",
+        "关键画面已启用：",
+        `本地 FFmpeg：${String(preprocessing.ffmpegPath || visual.ffmpegPath || "PATH 自动查找")}`,
+        `视觉服务：${String(vision.baseUrl ?? "")}`,
+        `视觉模型：${String(vision.model ?? "")}`,
+        "将上传候选帧的 512px 缩略图与前后 30 秒文字，不上传完整视频。"
+      ]
+      : [];
+    const titleModel = this.plugin.settings.agent.models.find((model) => model.role === "fast")
+      ?? this.plugin.settings.agent.models[0];
+    const formattingLines = formatting.mode === "constrained-llm"
+      ? [
+        `文字稿整理：约束式 Fast 模型（${titleModel?.id ?? "未配置 fast 模型"}）`,
+        `Agent 服务：${this.plugin.settings.agent.baseUrl}`,
+        "完整文字稿会分批发送给 Agent API；宿主会校验 Segment 顺序、数字、英文术语和字符守恒，校验失败自动回退本地分段。"
+      ]
+      : ["文字稿整理：纯本地规则，不会为分句分段额外发送完整文字稿。"];
+    const summary = [
+      `来源：${source.original.name}`,
+      `大小：${formatBytes(source.original.size)}`,
+      `协议：${String(options.protocol ?? "openai-transcriptions")}`,
+      `服务：${String(options.baseUrl ?? "")}`,
+      `模型：${String(options.model ?? "")}`,
+      `媒体预处理：${preprocessing.enabled === false ? "关闭，可能上传完整原件" : "开启，上传 16 kHz 单声道音频分片"}`,
+      ...(preprocessing.enabled === false ? [] : [
+        `分片：${Math.round(Number(preprocessing.chunkDurationSeconds ?? 900) / 60)} 分钟，重叠 ${Number(preprocessing.overlapSeconds ?? 2)} 秒`,
+        "中断后会保留已完成分片；继续前仍需再次确认远程上传。"
+      ]),
+      `标题生成：${titleModel?.id ?? "未配置 fast 模型"}`,
+      "标题生成会把最多约 8,000 字的代表性文字稿发送给 Agent API。",
+      ...formattingLines,
+      ...visualLines,
+      "",
+      ...(source.parse.status === "parsed"
+        ? ["这会创建新的 Parse Revision，旧 revision 仍保留在 Manifest 历史中。", ""]
+        : []),
+      "是否仅授权本次 ASR 转写、文字稿整理及上方列出的视觉分析？"
+    ].join("\n");
+    if (!await confirmAction(this.app, resume ? "确认继续远程解析" : "确认远程解析", summary, "确认并解析", true)) return;
+    if (button) button.disabled = true;
+    try {
+      this.plugin.mediaUploadConsent.approve(source.sourceId);
+      if (resume) await this.plugin.wiki.resumeSourceWith(source.sourceId, "media-transcription");
+      else await this.plugin.wiki.reparseSourceWith(source.sourceId, "media-transcription");
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (button) button.disabled = false;
+      await this.render();
     }
   }
 
@@ -1455,6 +1468,178 @@ export class WorkbenchView extends ItemView {
     button.onclick = () => new ReviewModal(this.plugin, plan).open();
   }
 
+  private async renderRecovery(panel: HTMLElement): Promise<void> {
+    let overview: RecoveryOverview;
+    try {
+      overview = await this.plugin.wiki.inspectRecovery();
+    } catch (error) {
+      panel.createEl("p", {
+        text: `恢复状态读取失败：${error instanceof Error ? error.message : String(error)}`,
+        cls: "llm-wiki-danger"
+      });
+      return;
+    }
+
+    const header = panel.createDiv({ cls: "llm-wiki-card llm-wiki-recovery-header" });
+    const heading = header.createDiv();
+    heading.createEl("h3", { text: "恢复中心" });
+    heading.createEl("p", {
+      text: "这里直接读取 Transaction Journal、Pending Plan、ParseAttempt 和媒体断点，不维护另一套恢复状态。",
+      cls: "llm-wiki-muted"
+    });
+    const headerActions = header.createDiv({ cls: "llm-wiki-actions" });
+    action(headerActions, "重新扫描", () => this.render());
+    const recoverAll = action(headerActions, "尝试自动恢复", async () => {
+      recoverAll.disabled = true;
+      try {
+        const recovered = await this.plugin.wiki.recoverTransactions();
+        let planRestored = false;
+        if (!this.plugin.workflows.pendingPlan) planRestored = await this.plugin.workflows.restorePendingPlan();
+        new Notice(recovered > 0 || planRestored
+          ? `恢复完成：${recovered} 个事务${planRestored ? "，1 个待审核计划" : ""}`
+          : "没有可自动完成的事务；受阻项目仍保留原始记录");
+      } catch (error) {
+        new Notice(`自动恢复未完成：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        recoverAll.disabled = false;
+        await this.render();
+      }
+    });
+    const diagnostic = action(headerActions, "导出脱敏诊断", async () => {
+      diagnostic.disabled = true;
+      try {
+        const path = await this.plugin.wiki.writeRecoveryDiagnostic(overview);
+        new Notice(`恢复诊断已保存：${path}`);
+      } catch (error) {
+        new Notice(`诊断导出失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        diagnostic.disabled = false;
+      }
+    });
+
+    const stats = panel.createDiv({ cls: "llm-wiki-grid" });
+    stat(stats, "待处理", overview.counts.total);
+    stat(stats, "可自动/手动恢复", overview.counts.recoverable);
+    stat(stats, "需要关注", overview.counts.blocked);
+
+    if (overview.healthy) {
+      const healthy = panel.createDiv({ cls: "llm-wiki-card llm-wiki-recovery-empty" });
+      healthy.createEl("h3", { text: "当前没有未完成的恢复任务" });
+      healthy.createEl("p", {
+        text: "事务、待审核计划、Raw 发布和媒体断点状态均无待处理项。",
+        cls: "llm-wiki-muted"
+      });
+      return;
+    }
+
+    for (const item of overview.items) this.renderRecoveryItem(panel, item);
+  }
+
+  private renderRecoveryItem(panel: HTMLElement, item: RecoveryItem): void {
+    const card = panel.createDiv({ cls: `llm-wiki-card llm-wiki-recovery-item is-${item.severity}` });
+    const heading = card.createDiv({ cls: "llm-wiki-source-heading" });
+    heading.createEl("h3", { text: item.title });
+    heading.createSpan({ text: recoveryKindLabel(item.kind), cls: "llm-wiki-chip" });
+    card.createEl("p", { text: item.detail });
+    const metadata = [
+      item.operationId ? `操作 ${item.operationId}` : "",
+      item.sourceId ? `来源 ${shortId(item.sourceId)}` : "",
+      item.progress ? `进度 ${item.progress.completed}/${item.progress.total}` : "",
+      item.updatedAt || item.createdAt ? new Date(item.updatedAt ?? item.createdAt!).toLocaleString() : ""
+    ].filter(Boolean);
+    if (metadata.length > 0) card.createEl("p", { text: metadata.join(" · "), cls: "llm-wiki-muted" });
+    const actions = card.createDiv({ cls: "llm-wiki-actions" });
+    if (item.action !== "none") {
+      const button = action(actions, recoveryActionLabel(item), async () => {
+        button.disabled = true;
+        try {
+          await this.runRecoveryAction(item, button);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    }
+    if (item.kind === "media-resume" && item.sourceId) {
+      const discard = action(actions, item.action === "none" ? "清理过期断点" : "放弃并清理断点", async () => {
+        if (!await confirmAction(
+          this.app,
+          "清理媒体断点",
+          "将删除已生成的音频分片和规范化转写缓存，但不会删除 ObjectStore 中的原始媒体。",
+          "确认清理",
+          true
+        )) return;
+        discard.disabled = true;
+        try {
+          await this.plugin.wiki.discardMediaResume(item.sourceId!);
+          new Notice("媒体断点已清理，原始媒体仍保留");
+        } catch (error) {
+          new Notice(error instanceof Error ? error.message : String(error));
+        } finally {
+          discard.disabled = false;
+          await this.render();
+        }
+      });
+    }
+    if (item.kind === "pending-plan" && item.severity === "error") {
+      const discard = action(actions, "放弃损坏计划并重置", async () => {
+        if (!await confirmAction(
+          this.app,
+          "放弃待审核计划",
+          "这会删除无法恢复的 Pending Plan，并把关联来源重置为可重新 Ingest；不会修改已经写入的 Wiki。事务日志不会被删除。",
+          "确认放弃",
+          true
+        )) return;
+        discard.disabled = true;
+        try {
+          const reset = await this.plugin.workflows.discardUnrestorablePending();
+          new Notice(`待审核计划已清理，${reset} 个来源已重置`);
+        } catch (error) {
+          new Notice(`计划清理失败：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          discard.disabled = false;
+          await this.render();
+        }
+      });
+    }
+    if (item.action === "none") {
+      card.createEl("p", {
+        text: "系统不会自动删除或猜测该状态；请先导出诊断并保留现有内部记录。",
+        cls: "llm-wiki-warning"
+      });
+    }
+  }
+
+  private async runRecoveryAction(item: RecoveryItem, button: HTMLButtonElement): Promise<void> {
+    try {
+      if (item.action === "recover-transactions") {
+        const recovered = await this.plugin.wiki.recoverTransactions();
+        new Notice(recovered > 0 ? `已恢复 ${recovered} 个事务` : "事务仍无法自动恢复，原始日志已保留");
+      } else if (item.action === "restore-pending-plan") {
+        if (!this.plugin.workflows.pendingPlan) await this.plugin.workflows.restorePendingPlan();
+        if (this.plugin.workflows.pendingPlan) {
+          this.plugin.settings.activeTab = "review";
+          await this.plugin.saveSettings();
+          new ReviewModal(this.plugin, this.plugin.workflows.pendingPlan).open();
+        } else {
+          new Notice("待审核计划已经完成或无需恢复");
+        }
+      } else if (item.action === "recover-raw-publication" && item.sourceId) {
+        const source = await this.plugin.wiki.recoverPendingRawPublication(item.sourceId);
+        new Notice(source.parse.status === "parsed" ? "Raw 发布已完成" : "Raw 发布仍未通过校验，状态记录已保留");
+      } else if (item.action === "retry-parse" && item.sourceId) {
+        await this.plugin.wiki.reparseSource(item.sourceId);
+        new Notice("来源重新解析完成");
+      } else if (item.action === "resume-media" && item.sourceId) {
+        const source = await this.plugin.wiki.getSource(item.sourceId);
+        await this.runMediaTranscription(source, item.kind === "media-resume", button);
+      }
+    } catch (error) {
+      new Notice(`恢复失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await this.render();
+    }
+  }
+
   private async renderQuery(panel: HTMLElement): Promise<void> {
     const session = this.plugin.activeSession();
     const conversation = panel.createDiv({ cls: "llm-wiki-conversation" });
@@ -1629,6 +1814,32 @@ function editableStatusLabel(status: EditableDocumentView["status"]): string {
 
 function revisionModeLabel(mode: EditableDocumentView["record"]["mode"]): string {
   return mode === "supplement" ? "补充" : mode === "rewrite" ? "改写" : "纠正";
+}
+
+function recoveryKindLabel(kind: RecoveryItem["kind"]): string {
+  return {
+    transaction: "Wiki 事务",
+    "pending-plan": "待审核计划",
+    "raw-publication": "Raw 发布",
+    "media-resume": "媒体断点",
+    "parse-retry": "来源解析",
+    manifest: "Manifest"
+  }[kind];
+}
+
+function recoveryActionLabel(item: RecoveryItem): string {
+  return {
+    "recover-transactions": "重新尝试恢复",
+    "restore-pending-plan": "恢复并打开审阅",
+    "recover-raw-publication": "重新校验并提交",
+    "resume-media": item.kind === "media-resume" ? "继续解析" : "重新解析",
+    "retry-parse": "重新解析",
+    none: ""
+  }[item.action];
+}
+
+function shortId(value: string): string {
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 }
 
 interface RunMonitor {

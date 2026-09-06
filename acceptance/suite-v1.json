@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "t-wiki-core-v1",
+  "title": "T-Wiki 固定质量与性能验收集",
+  "scenarios": [
+    {
+      "id": "ingest-standard-document",
+      "category": "ingest",
+      "title": "常规单文档 Ingest",
+      "description": "固定网络知识文档，从 Raw 到进入 Diff Review。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "durationMs", "label": "进入审阅耗时 P95", "unit": "ms", "aggregation": "p95", "operator": "lte", "target": 240000 },
+        { "metric": "providerRequests", "label": "Provider 请求 P95", "unit": "count", "aggregation": "p95", "operator": "lte", "target": 16 },
+        { "metric": "candidateRecall", "label": "候选召回率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.9 },
+        { "metric": "duplicatePageRate", "label": "重复页面率", "unit": "ratio", "aggregation": "mean", "operator": "lte", "target": 0.02 },
+        { "metric": "evidencePassRate", "label": "Evidence 通过率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.98 }
+      ]
+    },
+    {
+      "id": "ingest-incremental-note",
+      "category": "ingest",
+      "title": "笔记章节增量 Ingest",
+      "description": "只修改一个章节，验证候选完整且请求数不退化到全量路径。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "durationMs", "label": "进入审阅耗时 P95", "unit": "ms", "aggregation": "p95", "operator": "lte", "target": 120000 },
+        { "metric": "providerRequests", "label": "Provider 请求 P95", "unit": "count", "aggregation": "p95", "operator": "lte", "target": 10 },
+        { "metric": "candidateRecall", "label": "变更候选召回率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.95 },
+        { "metric": "duplicateWikiReadRate", "label": "重复 Wiki 读取率", "unit": "ratio", "aggregation": "mean", "operator": "lte", "target": 0.02 }
+      ]
+    },
+    {
+      "id": "query-direct-index",
+      "category": "query",
+      "title": "Index 直接命中问答",
+      "description": "问题可由 Root Index 定位一个或两个直接相关页面。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "durationMs", "label": "回答耗时 P95", "unit": "ms", "aggregation": "p95", "operator": "lte", "target": 90000 },
+        { "metric": "relevantPageRecall", "label": "相关页面召回率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.9 },
+        { "metric": "citationAccuracy", "label": "引用正确率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.98 },
+        { "metric": "unsupportedClaimRate", "label": "无依据结论率", "unit": "ratio", "aggregation": "mean", "operator": "lte", "target": 0.02 },
+        { "metric": "wikiReads", "label": "Wiki 精读页数 P95", "unit": "count", "aggregation": "p95", "operator": "lte", "target": 5 }
+      ]
+    },
+    {
+      "id": "query-two-hop",
+      "category": "query",
+      "title": "两跳图谱问答",
+      "description": "从 Source 到 Concept 再到 Related Concept，答案必须使用已读页面引用。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "multiHopSuccess", "label": "两跳成功率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.8 },
+        { "metric": "relevantPageRecall", "label": "相关页面召回率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.85 },
+        { "metric": "citationAccuracy", "label": "引用正确率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.98 },
+        { "metric": "unsupportedClaimRate", "label": "无依据结论率", "unit": "ratio", "aggregation": "mean", "operator": "lte", "target": 0.02 }
+      ]
+    },
+    {
+      "id": "parse-mixed-batch",
+      "category": "parse",
+      "title": "混合文档批量解析",
+      "description": "Markdown、文本、PDF 混合排队，记录吞吐、等待和峰值内存。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "throughputPerMinute", "label": "解析吞吐", "unit": "per-minute", "aggregation": "p50", "operator": "gte", "target": 6 },
+        { "metric": "queueWaitMs", "label": "排队等待 P95", "unit": "ms", "aggregation": "p95", "operator": "lte", "target": 30000 },
+        { "metric": "peakMemoryMiB", "label": "峰值内存", "unit": "mib", "aggregation": "max", "operator": "lte", "target": 768 }
+      ]
+    },
+    {
+      "id": "parse-crash-recovery",
+      "category": "parse",
+      "title": "解析发布崩溃恢复",
+      "description": "在 Raw 发布和 Manifest 提交边界注入失败并从 pendingRevision 恢复。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "recoverySuccess", "label": "恢复成功率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 1 },
+        { "metric": "orphanArtifactRate", "label": "孤立产物率", "unit": "ratio", "aggregation": "mean", "operator": "lte", "target": 0 }
+      ]
+    },
+    {
+      "id": "media-overlap-merge",
+      "category": "media",
+      "title": "音视频分片重叠消解",
+      "description": "固定边界文本包含精确和轻微 ASR 差异的重叠片段。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "overlapResolutionRate", "label": "重叠消解率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.95 },
+        { "metric": "contentConservationRate", "label": "非重叠内容保留率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.99 }
+      ]
+    },
+    {
+      "id": "media-readable-timeline",
+      "category": "media",
+      "title": "音视频文档可读性与时间轴",
+      "description": "检查自然段、时间顺序和字幕定位精度。",
+      "minimumSamples": 5,
+      "thresholds": [
+        { "metric": "paragraphReadability", "label": "段落可读性", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.85 },
+        { "metric": "timestampAccuracy", "label": "时间戳正确率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 0.98 },
+        { "metric": "timelineOrderRate", "label": "时间顺序正确率", "unit": "ratio", "aggregation": "mean", "operator": "gte", "target": 1 }
+      ]
+    }
+  ]
+}

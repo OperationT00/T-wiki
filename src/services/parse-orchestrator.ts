@@ -170,6 +170,14 @@ export class ParseOrchestrator {
     }
   }
 
+  async recoverPendingPublication(sourceId: string): Promise<SourceManifest> {
+    const manifest = await this.manifests.read(sourceId);
+    const attempt = [...manifest.parse.attempts].reverse().find((candidate) => Boolean(candidate.pendingRevision));
+    if (!attempt?.pendingRevision) throw new Error("该来源没有待恢复的 Raw 发布");
+    await this.recoverPendingRevision(manifest, attempt);
+    return this.manifests.read(sourceId);
+  }
+
   async discardResume(sourceId: string): Promise<SourceManifest> {
     const manifest = await this.manifests.read(sourceId);
     return this.manifests.update(sourceId, manifest.manifestRevision, (current) => {
