@@ -67,7 +67,20 @@ export default class LLMWikiPlugin extends Plugin {
   private webClipper?: WebClipperInboxConnector;
 
   async onload(): Promise<void> {
+    let stage = "读取插件设置";
+    try {
+      await this.initializePlugin((nextStage) => { stage = nextStage; });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`[T-Wiki] 插件加载失败（${stage}）`, error);
+      new Notice(`T-Wiki 加载失败（${stage}）：${detail}`, 0);
+      throw error;
+    }
+  }
+
+  private async initializePlugin(setStage: (stage: string) => void): Promise<void> {
     await this.loadSettings();
+    setStage("初始化服务");
     this.secrets = new SecretStore(this.app);
     const http = new ObsidianHttpClient();
     const runtimeFactory = new EmbeddedAgentRuntimeFactory(this.secrets, () => this.settings);
@@ -98,6 +111,7 @@ export default class LLMWikiPlugin extends Plugin {
       }
     }));
     this.workflows = new WorkflowService(this.wiki, runtimeFactory, () => this.settings);
+    setStage("监听 Vault 变更");
     this.registerEvent(this.app.vault.on("create", (file) => {
       if (file.path.endsWith(".md")) this.wiki.markNavigationIndexDirty(file.path);
     }));
@@ -119,17 +133,25 @@ export default class LLMWikiPlugin extends Plugin {
           .catch((error) => new Notice(`笔记状态同步失败：${error instanceof Error ? error.message : String(error)}`));
       }
     }));
+    setStage("启动来源连接器");
     await this.filePicker.start(this.connectorContext());
     await this.webUrlCapture.start(this.connectorContext());
     await this.bilibiliCapture.start(this.connectorContext());
     await this.douyinCapture.start(this.connectorContext());
 
-    this.registerView(VIEW_TYPE_LLM_WIKI, (leaf: WorkspaceLeaf) => new WorkbenchView(leaf, this));
+    setStage("注册界面和命令");
     this.addRibbonIcon("library-big", "打开 T-Wiki", () => void this.openWorkbench());
     this.addSettingTab(new LLMWikiSettingTab(this));
     this.registerCommands();
+    // Register the view last. If an earlier UI registration fails, a retry will
+    // not inherit a partially registered view type from the failed attempt.
+    this.registerView(VIEW_TYPE_LLM_WIKI, (leaf: WorkspaceLeaf) => new WorkbenchView(leaf, this));
 
-    this.app.workspace.onLayoutReady(async () => {
+    this.app.workspace.onLayoutReady(() => void this.completeLayoutStartup());
+  }
+
+  private async completeLayoutStartup(): Promise<void> {
+    try {
       if (await this.wiki.isInitialized()) {
         const recovered = await this.wiki.recoverTransactions();
         if (recovered > 0) new Notice(`T-Wiki 已恢复 ${recovered} 个未完成事务`);
@@ -144,7 +166,11 @@ export default class LLMWikiPlugin extends Plugin {
         }
         await this.restartWebClipperConnector();
       }
-    });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("[T-Wiki] 工作区恢复失败", error);
+      new Notice(`T-Wiki 已加载，但启动恢复未完成：${detail}`, 0);
+    }
   }
 
   onunload(): void {

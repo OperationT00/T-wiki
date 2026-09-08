@@ -4,6 +4,16 @@ All notable changes to T-Wiki are documented in this file.
 
 ## Unreleased
 
+## 0.1.8
+
+- Redesign the home dashboard around three primary actions, compact knowledge-base statistics, pending work and recent activity.
+- Keep the action and knowledge-status panels side by side in narrow Obsidian sidebars, with compact controls and stable color markers.
+- Add an empty-workspace onboarding state and simplify repeated explanatory copy in the workbench header and homepage.
+- Isolate workbench rendering and layout-recovery failures so non-critical UI or recovery errors do not disable the whole plugin.
+- Report the precise startup phase when plugin initialization fails.
+- Move the workbench view type to the final `t-wiki` namespace and register it last to recover safely from stale failed hot reloads.
+- Refresh the README structure and add a privacy-safe workbench overview image.
+
 ## 0.1.7
 
 - Add a versioned acceptance suite for standard and incremental Ingest, direct and two-hop Query, mixed Parse workloads, crash recovery and media transcript quality.

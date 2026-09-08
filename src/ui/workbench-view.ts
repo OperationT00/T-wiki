@@ -36,8 +36,12 @@ import {
 } from "./modals";
 import { sourcePipelineSteps } from "./pipeline-model";
 import type { EditableDocumentView } from "../editable-documents/types";
+import { homeDashboardSummary, type HomeDashboardSummary } from "./home-dashboard";
 
-export const VIEW_TYPE_LLM_WIKI = "llm-wiki-workbench";
+// Keep the registered view namespace aligned with the final community plugin ID.
+// The legacy `llm-wiki-workbench` ID can remain registered in Obsidian after a
+// failed hot reload, which would otherwise make every retry fail immediately.
+export const VIEW_TYPE_LLM_WIKI = "t-wiki-workbench";
 
 type SmartMode = "query" | "agent";
 
@@ -73,7 +77,11 @@ export class WorkbenchView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    await this.render();
+    try {
+      await this.render();
+    } catch (error) {
+      this.renderStartupError(error);
+    }
     this.ingestElapsedTimer = window.setInterval(() => this.refreshIngestElapsed(), 1_000);
   }
 
@@ -99,6 +107,23 @@ export class WorkbenchView extends ItemView {
     return operation;
   }
 
+  private renderStartupError(error: unknown): void {
+    const root = this.containerEl.children[1] as HTMLElement | undefined;
+    if (!root) return;
+    root.empty();
+    root.addClass("llm-wiki-view");
+    const panel = root.createDiv({ cls: "llm-wiki-panel" });
+    const card = panel.createDiv({ cls: "llm-wiki-card" });
+    card.createEl("h2", { text: "T-Wiki 界面暂时无法打开" });
+    card.createEl("p", {
+      text: error instanceof Error ? error.message : String(error),
+      cls: "llm-wiki-muted"
+    });
+    const retry = card.createEl("button", { text: "重试", cls: "mod-cta" });
+    retry.onclick = () => void this.render().catch((nextError) => this.renderStartupError(nextError));
+    console.error("[T-Wiki] 工作台渲染失败", error);
+  }
+
   private async renderNow(): Promise<void> {
     const root = this.containerEl.children[1] as HTMLElement;
     const previousTab = root.dataset.llmWikiActiveTab;
@@ -117,7 +142,6 @@ export class WorkbenchView extends ItemView {
     brand.createSpan({ text: "T", cls: "t-wiki-mark", attr: { "aria-hidden": "true" } });
     const brandText = brand.createDiv({ cls: "t-wiki-brand-text" });
     brandText.createEl("h2", { text: "T-Wiki" });
-    brandText.createSpan({ text: "Traceable knowledge workspace" });
     const refresh = header.createEl("button", { attr: { "aria-label": "刷新" } });
     setIcon(refresh, "refresh-cw");
     refresh.onclick = () => void this.render();
@@ -172,57 +196,163 @@ export class WorkbenchView extends ItemView {
   }
 
   private async renderHome(panel: HTMLElement): Promise<void> {
-    const [pages, state, lint, sources] = await Promise.all([
-      this.plugin.wiki.readPages(),
+    const [navigation, state, sources, documents, recovery] = await Promise.all([
+      this.plugin.wiki.getNavigationIndex(),
       this.plugin.wiki.loadState(),
-      this.plugin.wiki.runLint(),
-      this.plugin.wiki.listSources()
+      this.plugin.wiki.listSources(),
+      this.plugin.wiki.listEditableDocuments(),
+      this.plugin.wiki.inspectRecovery()
     ]);
-    const grid = panel.createDiv({ cls: "llm-wiki-grid" });
-    stat(grid, "Wiki 页面", pages.length);
-    stat(grid, "待吸收", sources.filter((item) =>
-      item.parse.status === "parsed" && item.ingest.status !== "ingested"
-    ).length);
-    stat(grid, "错误", lint.issues.filter((item) => item.severity === "error").length);
-    stat(grid, "警告", lint.issues.filter((item) => item.severity === "warning").length);
+    const summary = homeDashboardSummary(navigation, sources, documents, recovery);
+    this.renderHomeHero(panel, summary.stats);
+    if (summary.empty) {
+      this.renderEmptyKnowledgeBase(panel);
+      return;
+    }
 
-    const actions = panel.createDiv({ cls: "llm-wiki-card llm-wiki-actions" });
-    action(actions, "扫描素材", async () => {
+    const overview = panel.createDiv({ cls: "llm-wiki-home-overview" });
+    const pending = overview.createDiv({ cls: "llm-wiki-card llm-wiki-home-card" });
+    const pendingHeading = pending.createDiv({ cls: "llm-wiki-home-card-heading" });
+    pendingHeading.createEl("h3", { text: "待处理" });
+    const pendingTotal = summary.pending.readyToIngest + summary.pending.parsing
+      + summary.pending.awaitingReview + summary.pending.blocked;
+    pendingHeading.createSpan({ text: String(pendingTotal), cls: pendingTotal > 0 ? "is-warning" : "" });
+    homePendingRow(pending, "等待沉淀的素材", summary.pending.readyToIngest, "materials", () => this.openWorkbenchTab("materials"));
+    homePendingRow(pending, "正在解析或排队", summary.pending.parsing, "materials", () => this.openWorkbenchTab("materials"));
+    homePendingRow(pending, "等待 Diff 审阅", summary.pending.awaitingReview, "review", () => this.openWorkbenchTab("review"));
+    homePendingRow(pending, "需要恢复或处理", summary.pending.blocked, "recovery", () => this.openWorkbenchTab("recovery"));
+    if (summary.pending.failed > 0 || summary.pending.recoverable > 0) {
+      pending.createEl("p", {
+        text: `另有 ${summary.pending.failed} 个失败记录，${summary.pending.recoverable} 个项目可自动恢复。`,
+        cls: "llm-wiki-home-note"
+      });
+    }
+
+    const lower = panel.createDiv({ cls: "llm-wiki-home-lower" });
+    const recent = lower.createDiv({ cls: "llm-wiki-card llm-wiki-home-card" });
+    recent.createEl("h3", { text: "最近活动" });
+    if (state.recentOperations.length === 0) {
+      recent.createEl("p", { text: "完成第一次沉淀后，最近操作会显示在这里。", cls: "llm-wiki-muted" });
+    }
+    for (const item of state.recentOperations.slice(0, 6)) {
+      const row = recent.createDiv({ cls: "llm-wiki-home-activity" });
+      const activity = homeActivityAppearance(item.summary);
+      const marker = row.createSpan({
+        cls: `llm-wiki-home-activity-icon is-${activity.tone}`,
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(marker, activity.icon);
+      const copy = row.createDiv();
+      copy.createEl("strong", { text: item.summary });
+      copy.createSpan({ text: new Date(item.at).toLocaleString() });
+    }
+
+    const maintenance = lower.createDiv({ cls: "llm-wiki-card llm-wiki-home-card llm-wiki-home-maintenance" });
+    maintenance.createEl("h3", { text: "维护" });
+    maintenance.createEl("p", { text: "这些操作不会在打开主页时自动运行。", cls: "llm-wiki-muted" });
+    const maintenanceActions = maintenance.createDiv({ cls: "llm-wiki-actions" });
+    action(maintenanceActions, "校验 Raw", async () => {
       const report = await this.plugin.wiki.verifyRaw();
       const failures = report.filter((item) => !item.ok).length;
       new Notice(failures > 0 ? `素材校验完成：${failures} 个异常` : "素材校验通过");
       await this.render();
     });
-    action(actions, "运行 Lint", async () => {
-      await this.showLint(panel);
-    });
-    action(actions, "重建索引", async () => {
+    action(maintenanceActions, "运行 Lint", async () => this.showLint(panel));
+    action(maintenanceActions, "重建索引", async () => {
       await this.plugin.wiki.reindex();
       new Notice("index.md 已重建");
+      await this.render();
     });
+  }
 
-    const recent = panel.createDiv({ cls: "llm-wiki-card" });
-    recent.createEl("h3", { text: "最近操作" });
-    if (state.recentOperations.length === 0) recent.createEl("p", { text: "暂无操作", cls: "llm-wiki-muted" });
-    for (const item of state.recentOperations.slice(0, 10)) {
-      recent.createEl("p", { text: `${new Date(item.at).toLocaleString()} · ${item.summary}` });
+  private renderHomeHero(panel: HTMLElement, stats: HomeDashboardSummary["stats"]): void {
+    const hero = panel.createDiv({ cls: "llm-wiki-home-hero" });
+    const layout = hero.createDiv({ cls: "llm-wiki-home-hero-layout" });
+    const primary = layout.createDiv({ cls: "llm-wiki-home-hero-primary" });
+    primary.createSpan({ text: "YOUR KNOWLEDGE, CONNECTED", cls: "llm-wiki-home-eyebrow" });
+    primary.createEl("h1", { text: "把资料变成真正可用的知识网络" });
+    primary.createEl("p", {
+      text: "导入资料或编写笔记，沉淀为可追溯、可关联、可查询的 Wiki。"
+    });
+    const actions = primary.createDiv({ cls: "llm-wiki-home-primary-actions" });
+    homeAction(actions, "导入素材", "upload", true, () => this.openWorkbenchTab("materials"));
+    homeAction(actions, "新建笔记", "notebook-pen", false, () => this.createNewNote());
+    homeAction(actions, "开始提问", "message-circle-question", false, () => this.openWorkbenchTab("query"));
+
+    const status = layout.createDiv({ cls: "llm-wiki-home-hero-status" });
+    status.createEl("h2", { text: "知识库状态" });
+    const statusItems = status.createDiv({ cls: "llm-wiki-home-stats" });
+    homeStat(statusItems, "Wiki 页面", stats.wikiPages, "wiki");
+    homeStat(statusItems, "来源", stats.sources, "sources");
+    homeStat(statusItems, "知识链接", stats.links, "links");
+    homeStat(statusItems, "可编辑笔记", stats.notes, "notes");
+
+    const flow = hero.createDiv({ cls: "llm-wiki-home-flow", attr: { "aria-label": "T-Wiki 工作流程" } });
+    for (const [index, label] of ["导入 / 笔记", "Raw", "知识沉淀", "Diff 审阅", "Wiki 图谱", "Query"].entries()) {
+      if (index > 0) flow.createSpan({ text: "→", cls: "llm-wiki-home-flow-arrow", attr: { "aria-hidden": "true" } });
+      flow.createSpan({ text: label, cls: "llm-wiki-home-flow-step" });
+    }
+  }
+
+  private renderEmptyKnowledgeBase(panel: HTMLElement): void {
+    const empty = panel.createDiv({ cls: "llm-wiki-card llm-wiki-home-empty" });
+    const icon = empty.createSpan({ cls: "llm-wiki-home-empty-icon", attr: { "aria-hidden": "true" } });
+    setIcon(icon, "sprout");
+    empty.createEl("h2", { text: "开始建立你的第一个知识库" });
+    empty.createEl("p", { text: "选择一种起点。解析只生成 Raw；只有你审阅并确认 Diff 后，知识才会写入 Wiki。" });
+    const steps = empty.createDiv({ cls: "llm-wiki-home-empty-steps" });
+    for (const [number, title, description] of [
+      ["1", "准备内容", "导入已有资料，或者从一篇自己的笔记开始"],
+      ["2", "沉淀知识", "让 Agent 提取候选并比较现有 Wiki"],
+      ["3", "确认写入", "检查 Diff，选择真正需要保留的页面"]
+    ]) {
+      const step = steps.createDiv({ cls: "llm-wiki-home-empty-step" });
+      step.createSpan({ text: number });
+      const copy = step.createDiv();
+      copy.createEl("strong", { text: title });
+      copy.createEl("small", { text: description });
+    }
+  }
+
+  private async openWorkbenchTab(tab: PluginSettings["activeTab"]): Promise<void> {
+    this.plugin.settings.activeTab = tab;
+    await this.plugin.saveSettings();
+    await this.render();
+  }
+
+  private async createNewNote(): Promise<void> {
+    const title = await requestText(
+      this.app,
+      "新建 T-Wiki 笔记",
+      "笔记保存在可编辑工作区，只有明确发布后才会生成 Raw 快照。",
+      "",
+      false,
+      "笔记标题"
+    );
+    if (!title?.trim()) return;
+    try {
+      const view = await this.plugin.wiki.createEditableNote(title);
+      await this.openVaultFileExact(view.record.path);
+      await this.render();
+    } catch (error) {
+      new Notice(`创建笔记失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   private renderInitializationHome(panel: HTMLElement): void {
     const onboarding = panel.createDiv({ cls: "llm-wiki-onboarding" });
-    onboarding.createSpan({ text: "首次使用", cls: "llm-wiki-onboarding-badge" });
-    onboarding.createEl("h1", { text: "创建你的 T-Wiki 工作空间" });
+    onboarding.createSpan({ text: "首次使用 · 仅初始化本地 Vault", cls: "llm-wiki-onboarding-badge" });
+    onboarding.createEl("h1", { text: "开始建立你的第一个知识库" });
     onboarding.createEl("p", {
-      text: "当前 Vault 还是空的。初始化后即可导入文档，把原始资料持续整理成可追溯、互相链接的 Markdown Wiki。",
+      text: "T-Wiki 将文档、网页、笔记和音视频整理成结构化、可追溯、相互关联的 Markdown Wiki。先创建工作空间，再选择你的第一份内容。",
       cls: "llm-wiki-onboarding-lead"
     });
 
     const contents = onboarding.createDiv({ cls: "llm-wiki-onboarding-contents" });
     for (const [title, description] of [
-      ["Raw 与 Wiki 目录", "保存规范原文和结构化知识页面"],
-      ["模板与 Agent 规则", "生成 Source、Entity、Concept、Synthesis 和 Output 模板"],
-      ["内部状态与索引", "建立来源追溯、解析状态、审计数据和可重建导航索引"]
+      ["导入或编写", "从已有资料开始，也可以直接写一篇自己的笔记"],
+      ["沉淀与连接", "Agent 提取知识，并沿 WikiLink 建立可查询的关系"],
+      ["审阅后写入", "所有 Wiki 变化都会先展示 Diff，由你决定是否应用"]
     ]) {
       const item = contents.createDiv({ cls: "llm-wiki-onboarding-item" });
       const marker = item.createSpan({ cls: "llm-wiki-onboarding-check", attr: { "aria-hidden": "true" } });
@@ -238,7 +368,7 @@ export class WorkbenchView extends ItemView {
     initialize.createSpan({ text: "初始化 T-Wiki" });
     initialize.onclick = () => new InitializeModal(this.plugin).open();
     actions.createEl("p", {
-      text: "初始化只创建本地目录和规则，不会自动上传资料或调用 LLM API。",
+      text: "初始化只创建目录、模板、索引和内部状态，不会上传资料或调用 LLM API。",
       cls: "llm-wiki-muted"
     });
   }
@@ -341,22 +471,7 @@ export class WorkbenchView extends ItemView {
     const toolbar = panel.createDiv({ cls: "llm-wiki-card llm-wiki-material-toolbar" });
     const actions = toolbar.createDiv({ cls: "llm-wiki-material-action-group llm-wiki-material-action-group-primary" });
     action(actions, "新建笔记", async () => {
-      const title = await requestText(
-        this.app,
-        "新建 T-Wiki 笔记",
-        "笔记保存在可编辑工作区，只有明确发布后才会生成 Raw 快照。",
-        "",
-        false,
-        "笔记标题"
-      );
-      if (!title?.trim()) return;
-      try {
-        const view = await this.plugin.wiki.createEditableNote(title);
-        await this.openVaultFileExact(view.record.path);
-        await this.render();
-      } catch (error) {
-        new Notice(`创建笔记失败：${error instanceof Error ? error.message : String(error)}`);
-      }
+      await this.createNewNote();
     });
     toolbar.createEl("p", {
       text: "笔记和 Raw 修订稿可自由编辑；发布时生成不可变来源快照，沉淀时继续使用现有 Evidence、Diff 和事务流程。",
@@ -1791,6 +1906,16 @@ export class WorkbenchView extends ItemView {
   }
 }
 
+function homeActivityAppearance(summary: string): {
+  icon: string;
+  tone: "default" | "success" | "danger" | "warning";
+} {
+  if (/删除|移除/.test(summary)) return { icon: "trash-2", tone: "danger" };
+  if (/吸收|沉淀|合并|写入/.test(summary)) return { icon: "git-merge", tone: "success" };
+  if (/回滚|恢复/.test(summary)) return { icon: "rotate-ccw", tone: "warning" };
+  return { icon: "history", tone: "default" };
+}
+
 function formatMediaDuration(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs <= 0) return "";
   const totalSeconds = Math.round(durationMs / 1000);
@@ -2042,6 +2167,52 @@ function stat(container: HTMLElement, label: string, value: number): void {
   const el = container.createDiv({ cls: "llm-wiki-stat" });
   el.createEl("strong", { text: String(value) });
   el.createSpan({ text: label });
+}
+
+function homeAction(
+  container: HTMLElement,
+  label: string,
+  icon: string,
+  primary: boolean,
+  handler: () => void | Promise<void>
+): HTMLButtonElement {
+  const button = container.createEl("button", { cls: `llm-wiki-home-action${primary ? " mod-cta" : ""}` });
+  const marker = button.createSpan({ attr: { "aria-hidden": "true" } });
+  setIcon(marker, icon);
+  button.createSpan({ text: label });
+  button.onclick = () => void handler();
+  return button;
+}
+
+function homeStat(
+  container: HTMLElement,
+  label: string,
+  value: number,
+  tone: "wiki" | "sources" | "links" | "notes"
+): void {
+  const item = container.createDiv({ cls: "llm-wiki-home-stat" });
+  item.createSpan({
+    cls: `llm-wiki-home-stat-marker is-${tone}`,
+    attr: { "aria-hidden": "true" }
+  });
+  const copy = item.createDiv();
+  copy.createEl("strong", { text: String(value) });
+  copy.createSpan({ text: label });
+}
+
+function homePendingRow(
+  container: HTMLElement,
+  label: string,
+  value: number,
+  kind: "materials" | "review" | "recovery",
+  handler: () => void | Promise<void>
+): void {
+  const row = container.createEl("button", { cls: `llm-wiki-home-pending-row is-${kind}` });
+  row.createSpan({ text: label });
+  const count = row.createSpan({ text: String(value), cls: value > 0 ? "has-items" : "" });
+  count.setAttr("aria-label", `${value} 项`);
+  row.disabled = value === 0;
+  row.onclick = () => void handler();
 }
 
 function action(container: HTMLElement, label: string, handler: () => void | Promise<void>): HTMLButtonElement {

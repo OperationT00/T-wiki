@@ -514,6 +514,516 @@
   white-space: normal;
 }
 
+.llm-wiki-home-hero {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 14px;
+  padding: clamp(22px, 4vw, 38px);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 25%, var(--background-modifier-border));
+  border-radius: var(--radius-l);
+  background:
+    radial-gradient(circle at 92% 12%, color-mix(in srgb, var(--interactive-accent) 18%, transparent), transparent 34%),
+    linear-gradient(135deg, color-mix(in srgb, var(--background-secondary) 92%, var(--interactive-accent)), var(--background-secondary));
+}
+
+.llm-wiki-home-hero-layout {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(230px, 0.65fr);
+  align-items: stretch;
+  gap: clamp(18px, 3vw, 30px);
+}
+
+.llm-wiki-home-hero-primary {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.llm-wiki-home-hero::after {
+  content: "";
+  position: absolute;
+  right: -58px;
+  bottom: -76px;
+  width: 210px;
+  height: 210px;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.llm-wiki-home-eyebrow {
+  color: var(--text-accent);
+  font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+  letter-spacing: 0.12em;
+}
+
+.llm-wiki-home-hero h1 {
+  max-width: 720px;
+  margin: 9px 0 10px;
+  font-size: clamp(1.55em, 4vw, 2.3em);
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+}
+
+.llm-wiki-home-hero-primary > p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 1.02em;
+  line-height: 1.65;
+}
+
+.llm-wiki-home-primary-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  margin-top: 22px;
+}
+
+.llm-wiki-home-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: var(--font-small);
+}
+
+.llm-wiki-home-action svg {
+  width: 16px;
+  height: 16px;
+}
+
+.llm-wiki-home-hero-status {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 14%, var(--background-modifier-border));
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--background-primary) 88%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--background-modifier-box-shadow) 45%, transparent);
+}
+
+.llm-wiki-home-hero-status h2 {
+  margin: 0 0 12px;
+  font-size: 1.05em;
+  text-align: center;
+}
+
+.llm-wiki-home-hero-status .llm-wiki-home-stats {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.llm-wiki-home-flow {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 24px;
+  color: var(--text-faint);
+  font-size: var(--font-smallest);
+}
+
+.llm-wiki-home-flow-step {
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background-primary) 76%, transparent);
+}
+
+.llm-wiki-home-flow-arrow {
+  color: color-mix(in srgb, var(--interactive-accent) 55%, var(--text-faint));
+}
+
+.llm-wiki-home-lower {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.llm-wiki-home-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.llm-wiki-home-card {
+  min-width: 0;
+  padding: 16px;
+}
+
+.llm-wiki-home-card > h3,
+.llm-wiki-home-card-heading h3 {
+  margin: 0 0 13px;
+}
+
+.llm-wiki-home-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.llm-wiki-home-stat {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px;
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.llm-wiki-home-activity-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  line-height: 0;
+}
+
+.llm-wiki-home-stat-marker {
+  display: block;
+  width: 10px;
+  height: 34px;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+}
+
+.llm-wiki-home-stat-marker.is-sources {
+  background: var(--color-blue);
+}
+
+.llm-wiki-home-stat-marker.is-links {
+  background: var(--color-green);
+}
+
+.llm-wiki-home-stat-marker.is-notes {
+  background: var(--color-orange);
+}
+
+.llm-wiki-home-activity-icon.is-success {
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 13%, transparent);
+}
+
+.llm-wiki-home-activity-icon.is-danger {
+  color: var(--color-red);
+  background: color-mix(in srgb, var(--color-red) 12%, transparent);
+}
+
+.llm-wiki-home-activity-icon.is-warning {
+  color: var(--color-orange);
+  background: color-mix(in srgb, var(--color-orange) 13%, transparent);
+}
+
+.llm-wiki-home-activity-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.llm-wiki-home-stat strong,
+.llm-wiki-home-stat span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-wiki-home-stat strong {
+  font-size: 1.25em;
+  line-height: 1.1;
+}
+
+.llm-wiki-home-stat span {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+}
+
+.llm-wiki-home-card-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.llm-wiki-home-card-heading > span {
+  min-width: 25px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  text-align: center;
+  font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+}
+
+.llm-wiki-home-card-heading > span.is-warning {
+  color: var(--color-orange);
+  background: color-mix(in srgb, var(--color-orange) 13%, transparent);
+}
+
+.llm-wiki-home-pending-row {
+  display: flex;
+  width: 100%;
+  min-height: 35px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border: 0;
+  box-shadow: none;
+  background: var(--background-primary);
+  text-align: left;
+}
+
+.llm-wiki-home-pending-row:not(:disabled):hover {
+  background: var(--background-modifier-hover);
+}
+
+.llm-wiki-home-pending-row:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
+.llm-wiki-home-pending-row > span:last-child {
+  min-width: 24px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  text-align: center;
+}
+
+.llm-wiki-home-pending-row > span.has-items {
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 13%, transparent);
+}
+
+.llm-wiki-home-pending-row.is-review > span.has-items,
+.llm-wiki-home-pending-row.is-recovery > span.has-items {
+  color: var(--color-orange);
+  background: color-mix(in srgb, var(--color-orange) 13%, transparent);
+}
+
+.llm-wiki-home-note {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+}
+
+.llm-wiki-home-lower {
+  margin-top: 2px;
+}
+
+.llm-wiki-home-activity {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px 0;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.llm-wiki-home-activity:first-of-type {
+  border-top: 0;
+}
+
+.llm-wiki-home-activity strong,
+.llm-wiki-home-activity span {
+  display: block;
+}
+
+.llm-wiki-home-activity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-wiki-home-activity span {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+}
+
+.llm-wiki-home-maintenance .llm-wiki-actions {
+  flex-wrap: wrap;
+}
+
+.llm-wiki-home-empty {
+  padding: clamp(22px, 4vw, 34px);
+  text-align: center;
+}
+
+.llm-wiki-home-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 12px;
+  border-radius: 14px;
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 13%, transparent);
+}
+
+.llm-wiki-home-empty h2 {
+  margin: 0 0 7px;
+}
+
+.llm-wiki-home-empty > p {
+  max-width: 600px;
+  margin: 0 auto;
+  color: var(--text-muted);
+}
+
+.llm-wiki-home-empty-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 22px;
+  text-align: left;
+}
+
+.llm-wiki-home-empty-step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 11px;
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.llm-wiki-home-empty-step > span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+}
+
+.llm-wiki-home-empty-step strong,
+.llm-wiki-home-empty-step small {
+  display: block;
+}
+
+.llm-wiki-home-empty-step small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+@container (max-width: 720px) {
+  .llm-wiki-home-overview,
+  .llm-wiki-home-lower {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container (max-width: 520px) {
+  .llm-wiki-home-hero {
+    padding: 14px;
+  }
+
+  .llm-wiki-home-hero-layout {
+    grid-template-columns: minmax(0, 1.15fr) minmax(132px, 0.85fr);
+    gap: 10px;
+  }
+
+  .llm-wiki-home-eyebrow {
+    font-size: 0.65em;
+    letter-spacing: 0.08em;
+  }
+
+  .llm-wiki-home-hero h1 {
+    margin-block: 7px;
+    font-size: 1.35em;
+    letter-spacing: -0.025em;
+  }
+
+  .llm-wiki-home-hero-primary > p {
+    font-size: 0.82em;
+    line-height: 1.48;
+  }
+
+  .llm-wiki-home-primary-actions {
+    gap: 5px;
+    margin-top: 12px;
+  }
+
+  .llm-wiki-home-action {
+    min-height: 28px;
+    padding: 3px 7px;
+    font-size: var(--font-smallest);
+  }
+
+  .llm-wiki-home-action svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .llm-wiki-home-hero-status {
+    padding: 9px;
+  }
+
+  .llm-wiki-home-hero-status h2 {
+    margin-bottom: 7px;
+    font-size: 0.88em;
+  }
+
+  .llm-wiki-home-hero-status .llm-wiki-home-stats {
+    gap: 4px;
+  }
+
+  .llm-wiki-home-hero-status .llm-wiki-home-stat {
+    grid-template-columns: 9px minmax(0, 1fr);
+    gap: 5px;
+    padding: 5px;
+  }
+
+  .llm-wiki-home-hero-status .llm-wiki-home-stat-marker {
+    width: 7px;
+    height: 27px;
+    border-radius: 3px;
+  }
+
+  .llm-wiki-home-hero-status .llm-wiki-home-stat strong {
+    font-size: 1em;
+  }
+
+  .llm-wiki-home-hero-status .llm-wiki-home-stat span {
+    font-size: 0.68em;
+  }
+
+  .llm-wiki-home-primary-actions,
+  .llm-wiki-home-action {
+    width: 100%;
+  }
+
+  .llm-wiki-home-stats,
+  .llm-wiki-home-empty-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .llm-wiki-home-flow-arrow {
+    display: none;
+  }
+}
+
 .llm-wiki-onboarding {
   width: min(720px, 100%);
   box-sizing: border-box;
