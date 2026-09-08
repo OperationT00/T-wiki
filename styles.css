@@ -1062,43 +1062,24 @@
   line-height: 1.65;
 }
 
-.llm-wiki-onboarding-contents {
-  display: grid;
-  gap: 12px;
-  margin-top: 26px;
+.llm-wiki-onboarding-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 24px;
 }
 
-.llm-wiki-onboarding-item {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
-}
-
-.llm-wiki-onboarding-check {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  color: var(--color-green);
-  background: color-mix(in srgb, var(--color-green) 14%, transparent);
-}
-
-.llm-wiki-onboarding-check svg {
-  width: 14px;
-  height: 14px;
-}
-
-.llm-wiki-onboarding-item strong,
-.llm-wiki-onboarding-item span {
-  display: block;
-}
-
-.llm-wiki-onboarding-item span {
-  margin-top: 2px;
-  color: var(--text-muted);
+.llm-wiki-onboarding-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 11px;
+  border-radius: var(--radius-s);
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
   font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+  line-height: 1.2;
 }
 
 .llm-wiki-onboarding-actions {

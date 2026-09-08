@@ -4,6 +4,13 @@ All notable changes to T-Wiki are documented in this file.
 
 ## Unreleased
 
+## 0.2.0
+
+- Rework the community-facing README into a concise, screenshot-led introduction covering Parse, Ingest, Diff review, Wiki graph navigation and Query.
+- Publish privacy-safe workflow screenshots while keeping local design and verification notes out of the repository.
+- Move the English security policy into `docs/`, add a Simplified Chinese version and cross-link both languages.
+- Simplify the first-run homepage explanation into compact workflow labels so the primary initialization action remains prominent.
+
 ## 0.1.8
 
 - Redesign the home dashboard around three primary actions, compact knowledge-base statistics, pending work and recent activity.

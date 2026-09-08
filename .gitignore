@@ -9,3 +9,10 @@ acceptance-report.json
 .env
 .env.*
 .DS_Store
+
+# Keep local design and verification notes out of releases; publish screenshots only.
+docs/*
+!docs/images/
+!docs/images/**
+!docs/SECURITY.md
+!docs/SECURITY.zh-CN.md

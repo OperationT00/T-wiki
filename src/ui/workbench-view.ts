@@ -348,18 +348,12 @@ export class WorkbenchView extends ItemView {
       cls: "llm-wiki-onboarding-lead"
     });
 
-    const contents = onboarding.createDiv({ cls: "llm-wiki-onboarding-contents" });
-    for (const [title, description] of [
-      ["导入或编写", "从已有资料开始，也可以直接写一篇自己的笔记"],
-      ["沉淀与连接", "Agent 提取知识，并沿 WikiLink 建立可查询的关系"],
-      ["审阅后写入", "所有 Wiki 变化都会先展示 Diff，由你决定是否应用"]
-    ]) {
-      const item = contents.createDiv({ cls: "llm-wiki-onboarding-item" });
-      const marker = item.createSpan({ cls: "llm-wiki-onboarding-check", attr: { "aria-hidden": "true" } });
-      setIcon(marker, "check");
-      const copy = item.createDiv();
-      copy.createEl("strong", { text: title });
-      copy.createSpan({ text: description });
+    const contents = onboarding.createDiv({
+      cls: "llm-wiki-onboarding-tags",
+      attr: { "aria-label": "T-Wiki 工作流程" }
+    });
+    for (const title of ["导入或编写", "沉淀与连接", "审阅后写入"]) {
+      contents.createSpan({ text: title, cls: "llm-wiki-onboarding-tag" });
     }
 
     const actions = onboarding.createDiv({ cls: "llm-wiki-onboarding-actions" });

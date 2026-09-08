@@ -1,5 +1,7 @@
 # Security and permission model
 
+[English](SECURITY.md) | [简体中文](SECURITY.zh-CN.md)
+
 T-Wiki is a desktop-only plugin. Its default document and Wiki operations use
 Obsidian's Vault/DataAdapter APIs and stay inside the active vault.
 
